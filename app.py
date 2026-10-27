@@ -6,6 +6,7 @@ import streamlit as st
 
 from face_screening import screen_image_faces
 from file_sanitizer import sanitize_uploaded_image
+from image_quality import has_sufficient_visual_data
 
 try:
     import streamlit_shadcn_ui as ui
@@ -141,20 +142,28 @@ def render_home() -> None:
             if not clean_ok:
                 st.error(clean_message)
             else:
-                status, face_message, safe_image = screen_image_faces(rgb_image)
-                if status == "rejected":
-                    st.error(face_message)
-                elif status == "error":
-                    st.error(face_message)
+                data_ok, data_message, _ = has_sufficient_visual_data(rgb_image)
+                if not data_ok:
+                    st.warning(data_message)
                 else:
-                    if status == "blurred":
-                        st.warning(face_message)
-                    else:
-                        st.success(f"{message} {clean_message} {face_message}")
-                    st.image(
-                        safe_image, caption="Privacy-safe preview",
-                        use_container_width=True,
+                    status, face_message, safe_image = screen_image_faces(
+                        rgb_image
                     )
+                    if status == "rejected":
+                        st.error(face_message)
+                    elif status == "error":
+                        st.error(face_message)
+                    else:
+                        if status == "blurred":
+                            st.warning(face_message)
+                        else:
+                            st.success(
+                                f"{message} {clean_message} {face_message}"
+                            )
+                        st.image(
+                            safe_image, caption="Privacy-safe preview",
+                            use_container_width=True,
+                        )
 
     if analyze_clicked:
         valid, message = is_valid_image(uploaded_file)
@@ -167,16 +176,20 @@ def render_home() -> None:
             if not clean_ok:
                 st.warning(f"Cannot analyze yet: {clean_message}")
             else:
-                status, face_message, _ = screen_image_faces(rgb_image)
-                if status in ("rejected", "error"):
-                    st.warning(f"Cannot analyze: {face_message}")
+                data_ok, data_message, _ = has_sufficient_visual_data(rgb_image)
+                if not data_ok:
+                    st.warning(data_message)
                 else:
-                    hint_text = regional_hint.strip() or "(no hint provided)"
-                    st.info(
-                        f"Dummy action: would analyze privacy-screened "
-                        f"'{uploaded_file.name}' ({status}) "
-                        f"with regional hint: {hint_text}."
-                    )
+                    status, face_message, _ = screen_image_faces(rgb_image)
+                    if status in ("rejected", "error"):
+                        st.warning(f"Cannot analyze: {face_message}")
+                    else:
+                        hint_text = regional_hint.strip() or "(no hint provided)"
+                        st.info(
+                            f"Dummy action: would analyze privacy-screened "
+                            f"'{uploaded_file.name}' ({status}) "
+                            f"with regional hint: {hint_text}."
+                        )
 
 
 def render_how_it_works() -> None:
@@ -185,8 +198,9 @@ def render_how_it_works() -> None:
     st.markdown(
         "1. **Upload** a JPEG, PNG, or WebP photo (max 10 MB). Files are "
         "stripped of metadata and normalized to RGB at full resolution.\n"
-        "2. **Face screening** runs automatically: any face over 5% of the "
-        "image area is rejected, smaller faces are blurred.\n"
+        "2. **Pre-processing gates** run automatically: uploads lacking "
+        "visual data are halted, any face over 5% of the image area is "
+        "rejected, smaller faces are blurred.\n"
         "3. **Add a regional hint** such as nearby landmarks or architecture.\n"
         "4. **Analyze** to get location hypotheses based on visual clues."
     )
