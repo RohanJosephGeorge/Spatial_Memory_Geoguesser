@@ -1,5 +1,7 @@
 """Basic SpatialGeoGuesser upload app."""
 
+import asyncio
+
 import pandas as pd
 import streamlit as st
 
@@ -7,6 +9,13 @@ from analysis import execute_analysis
 from face_screening import screen_image_faces
 from file_sanitizer import is_valid_image, sanitize_uploaded_image
 from image_quality import has_sufficient_visual_data
+from sam_segmentation import (
+    RETRY_STATUS_TEXT,
+    SamApiError,
+    SamSegmenter,
+    draw_mask_boxes,
+    summarize_masks,
+)
 
 try:
     import streamlit_shadcn_ui as ui
@@ -60,11 +69,71 @@ def render_analysis_outcome(outcome: dict | None) -> None:
         st.error(outcome.get("message", "Analysis failed."))
 
 
+async def _run_sam_segmentation(screened_image, on_retry):
+    async with SamSegmenter(on_retry=on_retry) as segmenter:
+        return await segmenter.segment_image(screened_image)
+
+
+def render_sam_section(screened_image, is_processing: bool = False) -> None:
+    """Live SAM 3.1 concept segmentation for the screened upload."""
+    if screened_image is None:
+        return
+    st.space("small")
+    st.subheader("SAM 3.1 live segmentation")
+    st.caption(
+        "Concept masks for text, architectural features, and vegetation "
+        "via Meta Model API (requires META_API_KEY in secrets)."
+    )
+    if st.button(
+        "Segment with SAM 3.1",
+        key="sam_btn",
+        disabled=is_processing,
+        help="Sends the full-resolution screened image to SAM 3.1.",
+    ):
+        retry_status = st.empty()
+
+        def _show_retry(attempt: int, wait_seconds: float) -> None:
+            retry_status.info(RETRY_STATUS_TEXT)
+
+        try:
+            with st.spinner("Segmenting with SAM 3.1..."):
+                sam_result = asyncio.run(
+                    _run_sam_segmentation(screened_image, _show_retry)
+                )
+        except SamApiError as exc:
+            retry_status.empty()
+            st.session_state["sam_result"] = {"error": str(exc)}
+        else:
+            retry_status.empty()
+            st.session_state["sam_result"] = {
+                "summary": summarize_masks(sam_result),
+                "annotated": draw_mask_boxes(
+                    screened_image, sam_result.get("masks", [])
+                ),
+                "mask_count": sam_result.get("mask_count", 0),
+            }
+    stored = st.session_state.get("sam_result")
+    if not stored:
+        return
+    if "error" in stored:
+        st.error(stored["error"])
+    else:
+        st.success(f"SAM 3.1 found {stored['mask_count']} mask(s).")
+        st.image(
+            stored["annotated"],
+            caption="SAM 3.1 concept boxes",
+            use_container_width=True,
+        )
+        st.json(stored["summary"])
+
+
 def render_home(developer_mode: bool = True) -> None:
     st.session_state.setdefault("is_processing", False)
     st.session_state.setdefault("analysis_pending", False)
     st.session_state.setdefault("analysis_outcome", None)
     st.session_state.setdefault("last_upload_key", None)
+    st.session_state.setdefault("screened_image", None)
+    st.session_state.setdefault("sam_result", None)
     is_processing = st.session_state["is_processing"]
 
     st.title("SpatialGeoGuesser")
@@ -142,6 +211,7 @@ def render_home(developer_mode: bool = True) -> None:
                             safe_image, caption="Privacy-safe preview",
                             use_container_width=True,
                         )
+                        st.session_state["screened_image"] = safe_image
 
     if st.session_state["analysis_pending"] and is_processing:
         label = (
@@ -166,8 +236,13 @@ def render_home(developer_mode: bool = True) -> None:
     if st.session_state["last_upload_key"] != upload_key:
         st.session_state["last_upload_key"] = upload_key
         st.session_state["analysis_outcome"] = None
+        st.session_state["screened_image"] = None
+        st.session_state["sam_result"] = None
 
     render_analysis_outcome(st.session_state["analysis_outcome"])
+    render_sam_section(
+        st.session_state["screened_image"], is_processing=is_processing
+    )
 
 
 def render_how_it_works() -> None:

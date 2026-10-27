@@ -40,7 +40,7 @@ from meta_sam_parser import (
     image_segmentation_format,
     parse_responses_stream,
 )
-from PIL import Image
+from PIL import Image, ImageDraw
 
 DEFAULT_BASE_URL = "https://api.meta.ai/v1"
 DEFAULT_MODEL = "sam-3.1"
@@ -131,6 +131,55 @@ def _bounds_dict(record) -> dict | None:
         "right": bounds.right,
         "bottom": bounds.bottom,
     }
+
+
+CONCEPT_COLORS = {
+    "text": (255, 80, 80),
+    "architectural features": (80, 160, 255),
+    "vegetation": (80, 220, 120),
+}
+DEFAULT_BOX_COLOR = (200, 200, 200)
+
+
+def summarize_masks(result: dict | None) -> list[dict]:
+    """Build a JSON-safe summary of segmentation masks (no raster bytes)."""
+    summaries = []
+    for mask in (result or {}).get("masks", []):
+        info = mask.get("mask", {})
+        summaries.append(
+            {
+                "concept": mask.get("concept"),
+                "object_id": mask.get("object_id"),
+                "confidence": mask.get("confidence"),
+                "box": mask.get("box"),
+                "width": info.get("width"),
+                "height": info.get("height"),
+                "pixel_count": info.get("pixel_count"),
+            }
+        )
+    return summaries
+
+
+def draw_mask_boxes(
+    image: Image.Image, masks: Sequence[dict], width: int = 3
+) -> Image.Image:
+    """Return a copy with each mask's box drawn in its concept color."""
+    annotated = image.convert("RGB").copy()
+    draw = ImageDraw.Draw(annotated)
+    for mask in masks:
+        box = mask.get("box") or {}
+        try:
+            coords = [box["left"], box["top"], box["right"], box["bottom"]]
+        except KeyError:
+            continue
+        color = CONCEPT_COLORS.get(mask.get("concept"), DEFAULT_BOX_COLOR)
+        draw.rectangle(coords, outline=color, width=width)
+        draw.text(
+            (coords[0] + 2, coords[1] + 2),
+            f"{mask.get('concept', '?')} #{mask.get('object_id', '?')}",
+            fill=color,
+        )
+    return annotated
 
 
 class SamSegmenter:

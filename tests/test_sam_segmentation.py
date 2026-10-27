@@ -34,8 +34,10 @@ from sam_segmentation import (
     SamApiError,
     SamRetryableError,
     SamSegmenter,
+    draw_mask_boxes,
     select_latest_masks,
     sniff_image_mime,
+    summarize_masks,
 )
 
 
@@ -340,6 +342,50 @@ class RetryPolicyTests(unittest.IsolatedAsyncioTestCase):
         result = await seg.segment_image(gradient_png(), concepts="text")
         self.assertEqual(result["mask_count"], 1)
         self.assertEqual(seen, [(1, 2), (2, 4)])
+
+
+class MaskDisplayTests(unittest.TestCase):
+    def _mask(self, concept="text", box="default", raster=b"\x01\x00\x00\x01"):
+        if box == "default":
+            box = {"left": 2, "top": 3, "right": 8, "bottom": 9}
+        return {
+            "concept": concept,
+            "object_id": "0",
+            "confidence": 0.9,
+            "box": box,
+            "mask": {"width": 2, "height": 2, "pixel_count": 2, "raster": raster},
+        }
+
+    def test_summarize_strips_raster_keeps_fields(self):
+        summary = summarize_masks({"masks": [self._mask()]})
+        self.assertEqual(len(summary), 1)
+        entry = summary[0]
+        self.assertNotIn("raster", entry)
+        self.assertEqual(entry["concept"], "text")
+        self.assertEqual(entry["pixel_count"], 2)
+        self.assertEqual(entry["box"]["left"], 2)
+        json.dumps(summary)
+
+    def test_summarize_empty_result(self):
+        self.assertEqual(summarize_masks(None), [])
+        self.assertEqual(summarize_masks({}), [])
+
+    def test_draw_boxes_marks_concept_color(self):
+        img = Image.new("RGB", (20, 20), (255, 255, 255))
+        out = draw_mask_boxes(img, [self._mask()])
+        self.assertEqual(out.size, (20, 20))
+        self.assertEqual(out.getpixel((2, 3)), (255, 80, 80))
+        self.assertEqual(img.getpixel((2, 3)), (255, 255, 255))
+
+    def test_draw_boxes_skips_missing_box(self):
+        img = Image.new("RGB", (20, 20), (255, 255, 255))
+        out = draw_mask_boxes(img, [self._mask(box=None)])
+        self.assertEqual(list(out.getdata()), list(img.getdata()))
+
+    def test_draw_boxes_unknown_concept_uses_default(self):
+        img = Image.new("RGB", (20, 20), (255, 255, 255))
+        out = draw_mask_boxes(img, [self._mask(concept="car")])
+        self.assertEqual(out.getpixel((2, 3)), (200, 200, 200))
 
     async def test_failed_stream_maps_to_sam_api_error(self):
         session = FakeSession(
