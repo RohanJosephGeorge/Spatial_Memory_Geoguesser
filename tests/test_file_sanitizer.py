@@ -14,6 +14,7 @@ from PIL import Image
 from file_sanitizer import (
     MAX_UPLOAD_BYTES,
     encode_clean_jpeg,
+    is_valid_image,
     sanitize_uploaded_image,
 )
 
@@ -99,6 +100,55 @@ class SizeCapTests(unittest.TestCase):
         f = io.BytesIO(jpeg_bytes_with_exif(gradient_image()))
         sanitize_uploaded_image(f)
         self.assertEqual(f.tell(), 0)
+
+
+class ImageValidationTests(unittest.TestCase):
+    def _upload(self, data, name="photo.png", mime="image/png", size=None):
+        f = io.BytesIO(data)
+        f.name = name
+        f.type = mime
+        f.size = len(data) if size is None else size
+        return f
+
+    def _png_bytes(self):
+        buf = io.BytesIO()
+        gradient_image().save(buf, format="PNG")
+        return buf.getvalue()
+
+    def test_valid_png_passes(self):
+        valid, _ = is_valid_image(self._upload(self._png_bytes()))
+        self.assertTrue(valid)
+
+    def test_none_rejected(self):
+        valid, message = is_valid_image(None)
+        self.assertFalse(valid)
+        self.assertIn("No file", message)
+
+    def test_bad_extension_rejected(self):
+        valid, message = is_valid_image(
+            self._upload(self._png_bytes(), name="photo.gif", mime="image/gif")
+        )
+        self.assertFalse(valid)
+        self.assertIn("extension", message)
+
+    def test_bad_mime_rejected(self):
+        valid, message = is_valid_image(
+            self._upload(self._png_bytes(), mime="application/octet-stream")
+        )
+        self.assertFalse(valid)
+        self.assertIn("MIME", message)
+
+    def test_oversize_rejected(self):
+        valid, message = is_valid_image(
+            self._upload(self._png_bytes(), size=MAX_UPLOAD_BYTES + 1)
+        )
+        self.assertFalse(valid)
+        self.assertIn("10 MB", message)
+
+    def test_wrong_magic_bytes_rejected(self):
+        valid, message = is_valid_image(self._upload(b"GIF89a" + b"0" * 20))
+        self.assertFalse(valid)
+        self.assertIn("contents", message)
 
 
 class JpegEncodingTests(unittest.TestCase):

@@ -9,8 +9,17 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
 import urllib.error
 import urllib.request
+
+from face_screening import screen_image_faces
+from file_sanitizer import (
+    encode_clean_jpeg,
+    is_valid_image,
+    sanitize_uploaded_image,
+)
+from image_quality import has_sufficient_visual_data
 
 BACKEND_URL = os.environ.get("SPATIAL_BACKEND_URL", "http://localhost:8000")
 ANALYZE_PATH = "/analyze"
@@ -67,3 +76,44 @@ def analyze_via_backend(
             return json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, ValueError) as exc:
         raise AnalysisError(f"Backend unavailable at {backend_url}: {exc}")
+
+
+def execute_analysis(
+    uploaded_file,
+    regional_hint: str,
+    developer_mode: bool = True,
+    screener=screen_image_faces,
+    backend=analyze_via_backend,
+    sleeper=time.sleep,
+) -> dict:
+    """Run validate -> sanitize -> quality -> screen -> analyze.
+
+    Returns a JSON-serializable outcome dict: {"kind": "ok", "mock": bool,
+    "result": dict} on success, or {"kind": "halt"|"error", "message": str}.
+    """
+    valid, message = is_valid_image(uploaded_file)
+    if not valid:
+        return {"kind": "halt", "message": f"Cannot analyze yet: {message}"}
+    clean_ok, clean_message, rgb_image = sanitize_uploaded_image(uploaded_file)
+    if not clean_ok:
+        return {"kind": "halt", "message": f"Cannot analyze yet: {clean_message}"}
+    data_ok, data_message, _ = has_sufficient_visual_data(rgb_image)
+    if not data_ok:
+        return {"kind": "halt", "message": data_message}
+    status, face_message, safe_image = screener(rgb_image)
+    if status in ("rejected", "error"):
+        return {"kind": "halt", "message": f"Cannot analyze: {face_message}"}
+    if developer_mode:
+        sleeper(2)
+        return {
+            "kind": "ok",
+            "mock": True,
+            "result": mock_analysis_result(uploaded_file.name, regional_hint),
+        }
+    try:
+        result = backend(
+            encode_clean_jpeg(safe_image), uploaded_file.name, regional_hint
+        )
+    except AnalysisError as exc:
+        return {"kind": "error", "message": str(exc)}
+    return {"kind": "ok", "mock": False, "result": result}

@@ -1,17 +1,11 @@
 """Basic SpatialGeoGuesser upload app."""
 
-import os
-import time
-
+import pandas as pd
 import streamlit as st
 
-from analysis import (
-    AnalysisError,
-    analyze_via_backend,
-    mock_analysis_result,
-)
+from analysis import execute_analysis
 from face_screening import screen_image_faces
-from file_sanitizer import encode_clean_jpeg, sanitize_uploaded_image
+from file_sanitizer import is_valid_image, sanitize_uploaded_image
 from image_quality import has_sufficient_visual_data
 
 try:
@@ -23,68 +17,6 @@ try:
     from streamlit_option_menu import option_menu
 except ImportError:  # pragma: no cover
     option_menu = None
-
-
-ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
-ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
-MAX_FILE_SIZE_MB = 10
-MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
-
-
-def is_valid_image(uploaded_file) -> tuple[bool, str]:
-    """Strictly validate that an uploaded file is a supported image type.
-
-    Checks filename/extension, Streamlit-reported MIME type, non-empty size
-    with an upper limit, and image magic bytes.
-    """
-    if uploaded_file is None:
-        return False, "No file uploaded."
-
-    filename = getattr(uploaded_file, "name", "") or ""
-    _, ext = os.path.splitext(filename)
-    ext = ext.lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        return False, (
-            f"Invalid file extension '{ext or '(none)'}'. "
-            f"Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}."
-        )
-
-    mime_type = getattr(uploaded_file, "type", "") or ""
-    if mime_type not in ALLOWED_MIME_TYPES:
-        return False, (
-            f"Invalid MIME type '{mime_type or '(unknown)'}'. "
-            f"Allowed: {', '.join(sorted(ALLOWED_MIME_TYPES))}."
-        )
-
-    size = getattr(uploaded_file, "size", None)
-    if size is None:
-        return False, "Could not determine file size."
-    if size == 0:
-        return False, "File is empty."
-    if size > MAX_FILE_SIZE_BYTES:
-        return False, f"File exceeds {MAX_FILE_SIZE_MB} MB limit."
-
-    try:
-        uploaded_file.seek(0)
-        header = uploaded_file.read(12)
-    except Exception:
-        return False, "Could not read file contents."
-    finally:
-        try:
-            uploaded_file.seek(0)
-        except Exception:
-            pass
-
-    if len(header) < 4:
-        return False, "File is too small to be a valid image."
-
-    is_jpeg = header.startswith(b"\xff\xd8\xff")
-    is_png = header.startswith(b"\x89PNG\r\n\x1a\n")
-    is_webp = len(header) >= 12 and header[0:4] == b"RIFF" and header[8:12] == b"WEBP"
-    if not (is_jpeg or is_png or is_webp):
-        return False, "File contents do not match a JPEG, PNG, or WebP image."
-
-    return True, "Valid image."
 
 
 def inject_heading_styles() -> None:
@@ -102,7 +34,39 @@ def inject_heading_styles() -> None:
     )
 
 
+def render_result_map(result: dict) -> None:
+    """Render a map for result coordinates when present."""
+    coords = (result or {}).get("coordinates") or {}
+    lat, lon = coords.get("latitude"), coords.get("longitude")
+    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+        st.map(pd.DataFrame([{"lat": lat, "lon": lon}]), zoom=13)
+
+
+def render_analysis_outcome(outcome: dict | None) -> None:
+    """Render a stored analysis outcome (result + map, or halt/error)."""
+    if not outcome:
+        return
+    kind = outcome.get("kind")
+    if kind == "ok":
+        if outcome.get("mock"):
+            st.success("Mock analysis complete (no backend call).")
+        else:
+            st.success("Analysis complete.")
+        st.json(outcome.get("result", {}))
+        render_result_map(outcome.get("result", {}))
+    elif kind == "halt":
+        st.warning(outcome.get("message", "Analysis halted."))
+    else:
+        st.error(outcome.get("message", "Analysis failed."))
+
+
 def render_home(developer_mode: bool = True) -> None:
+    st.session_state.setdefault("is_processing", False)
+    st.session_state.setdefault("analysis_pending", False)
+    st.session_state.setdefault("analysis_outcome", None)
+    st.session_state.setdefault("last_upload_key", None)
+    is_processing = st.session_state["is_processing"]
+
     st.title("SpatialGeoGuesser")
     st.caption("Upload a memory photo and add an optional regional hint.")
     st.space("small")
@@ -128,6 +92,7 @@ def render_home(developer_mode: bool = True) -> None:
             type=["jpg", "jpeg", "png", "webp"],
             accept_multiple_files=False,
             help="JPEG, PNG, or WebP up to 10 MB.",
+            disabled=is_processing,
         )
         st.space("small")
         regional_hint = st.text_input(
@@ -135,7 +100,14 @@ def render_home(developer_mode: bool = True) -> None:
             placeholder="e.g. coastal town, temple architecture, alpine village",
         )
         st.space("small")
-        analyze_clicked = ui.button("Analyze Memory", key="analyze_btn")
+        analyze_clicked = ui.button(
+            "Analyze Memory", key="analyze_btn", disabled=is_processing
+        )
+
+    if analyze_clicked and not is_processing:
+        st.session_state["is_processing"] = True
+        st.session_state["analysis_pending"] = True
+        st.rerun()
 
     if uploaded_file is not None:
         valid, message = is_valid_image(uploaded_file)
@@ -171,47 +143,31 @@ def render_home(developer_mode: bool = True) -> None:
                             use_container_width=True,
                         )
 
-    if analyze_clicked:
-        valid, message = is_valid_image(uploaded_file)
-        if not valid:
-            st.warning(f"Cannot analyze yet: {message}")
-        else:
-            clean_ok, clean_message, rgb_image = sanitize_uploaded_image(
-                uploaded_file
+    if st.session_state["analysis_pending"] and is_processing:
+        label = (
+            "Analyzing memory (mock data)..."
+            if developer_mode
+            else "Analyzing memory..."
+        )
+        with st.spinner(label):
+            outcome = execute_analysis(
+                uploaded_file, regional_hint, developer_mode
             )
-            if not clean_ok:
-                st.warning(f"Cannot analyze yet: {clean_message}")
-            else:
-                data_ok, data_message, _ = has_sufficient_visual_data(rgb_image)
-                if not data_ok:
-                    st.warning(data_message)
-                else:
-                    status, face_message, safe_image = screen_image_faces(
-                        rgb_image
-                    )
-                    if status in ("rejected", "error"):
-                        st.warning(f"Cannot analyze: {face_message}")
-                    elif developer_mode:
-                        with st.spinner("Analyzing memory (mock data)..."):
-                            time.sleep(2)
-                        result = mock_analysis_result(
-                            uploaded_file.name, regional_hint
-                        )
-                        st.success("Mock analysis complete (no backend call).")
-                        st.json(result)
-                    else:
-                        try:
-                            with st.spinner("Analyzing memory..."):
-                                result = analyze_via_backend(
-                                    encode_clean_jpeg(safe_image),
-                                    uploaded_file.name,
-                                    regional_hint,
-                                )
-                        except AnalysisError as exc:
-                            st.error(str(exc))
-                        else:
-                            st.success("Analysis complete.")
-                            st.json(result)
+        st.session_state["analysis_outcome"] = outcome
+        st.session_state["analysis_pending"] = False
+        st.session_state["is_processing"] = False
+        st.rerun()
+
+    upload_key = (
+        f"{uploaded_file.name}:{uploaded_file.size}"
+        if uploaded_file is not None
+        else None
+    )
+    if st.session_state["last_upload_key"] != upload_key:
+        st.session_state["last_upload_key"] = upload_key
+        st.session_state["analysis_outcome"] = None
+
+    render_analysis_outcome(st.session_state["analysis_outcome"])
 
 
 def render_how_it_works() -> None:

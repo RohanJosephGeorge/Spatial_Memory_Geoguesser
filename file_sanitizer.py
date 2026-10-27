@@ -8,12 +8,71 @@ Files over the byte cap are rejected before decoding to bound memory use.
 from __future__ import annotations
 
 import io
+import os
 from typing import BinaryIO
 
 from PIL import Image
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 JPEG_QUALITY = 95
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+
+
+def is_valid_image(uploaded_file) -> tuple[bool, str]:
+    """Strictly validate that an uploaded file is a supported image type.
+
+    Checks filename/extension, Streamlit-reported MIME type, non-empty size
+    with an upper limit, and image magic bytes.
+    """
+    if uploaded_file is None:
+        return False, "No file uploaded."
+
+    filename = getattr(uploaded_file, "name", "") or ""
+    _, ext = os.path.splitext(filename)
+    ext = ext.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        return False, (
+            f"Invalid file extension '{ext or '(none)'}'. "
+            f"Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}."
+        )
+
+    mime_type = getattr(uploaded_file, "type", "") or ""
+    if mime_type not in ALLOWED_MIME_TYPES:
+        return False, (
+            f"Invalid MIME type '{mime_type or '(unknown)'}'. "
+            f"Allowed: {', '.join(sorted(ALLOWED_MIME_TYPES))}."
+        )
+
+    size = getattr(uploaded_file, "size", None)
+    if size is None:
+        return False, "Could not determine file size."
+    if size == 0:
+        return False, "File is empty."
+    if size > MAX_UPLOAD_BYTES:
+        return False, "File exceeds 10 MB limit."
+
+    try:
+        uploaded_file.seek(0)
+        header = uploaded_file.read(12)
+    except Exception:
+        return False, "Could not read file contents."
+    finally:
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+
+    if len(header) < 4:
+        return False, "File is too small to be a valid image."
+
+    is_jpeg = header.startswith(b"\xff\xd8\xff")
+    is_png = header.startswith(b"\x89PNG\r\n\x1a\n")
+    is_webp = len(header) >= 12 and header[0:4] == b"RIFF" and header[8:12] == b"WEBP"
+    if not (is_jpeg or is_png or is_webp):
+        return False, "File contents do not match a JPEG, PNG, or WebP image."
+
+    return True, "Valid image."
 
 
 def _flatten_to_rgb(img: Image.Image) -> Image.Image:
