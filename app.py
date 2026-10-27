@@ -16,6 +16,11 @@ from sam_segmentation import (
     draw_mask_boxes,
     summarize_masks,
 )
+from spatial_reasoning import (
+    LocationUnknownError,
+    SpatialReasoner,
+    SpatialReasoningError,
+)
 
 try:
     import streamlit_shadcn_ui as ui
@@ -127,6 +132,79 @@ def render_sam_section(screened_image, is_processing: bool = False) -> None:
         st.json(stored["summary"])
 
 
+async def _run_wonder_reasoning(sam_summary, regional_hint, on_retry):
+    async with SpatialReasoner(on_retry=on_retry) as reasoner:
+        return await reasoner.reason(sam_summary, regional_hint)
+
+
+def render_wonder_section(
+    sam_summary, regional_hint: str, is_processing: bool = False
+) -> None:
+    """Muse Wonder geolocation over SAM masks plus the regional hint."""
+    if not sam_summary:
+        return
+    st.space("small")
+    st.subheader("Muse Wonder geolocation")
+    st.caption(
+        "Multi-step spatial reasoning over the SAM masks "
+        "(requires META_API_KEY in secrets)."
+    )
+    if st.button(
+        "Geolocate with Wonder",
+        key="wonder_btn",
+        disabled=is_processing,
+        help="Sends SAM masks and the hint to Muse Wonder.",
+    ):
+        retry_status = st.empty()
+
+        def _show_retry(attempt: int, wait_seconds: float) -> None:
+            retry_status.info(RETRY_STATUS_TEXT)
+
+        try:
+            with st.spinner("Reasoning about location..."):
+                wonder_result = asyncio.run(
+                    _run_wonder_reasoning(
+                        sam_summary, regional_hint, _show_retry
+                    )
+                )
+        except LocationUnknownError as exc:
+            retry_status.empty()
+            st.session_state["wonder_result"] = {"location_unknown": str(exc)}
+        except (SamApiError, SpatialReasoningError) as exc:
+            retry_status.empty()
+            st.session_state["wonder_result"] = {"error": str(exc)}
+        else:
+            retry_status.empty()
+            st.session_state["wonder_result"] = {"result": wonder_result}
+    stored = st.session_state.get("wonder_result")
+    if not stored:
+        return
+    if "location_unknown" in stored:
+        st.error(f"Location Unknown: {stored['location_unknown']}")
+    elif "error" in stored:
+        st.error(stored["error"])
+    else:
+        result = stored["result"]
+        if result.get("latitude") is None:
+            steps = result.get("reasoning_steps") or ["Analysis halted."]
+            st.warning(f"Analysis halted: {steps[0]}")
+            st.json(result)
+        else:
+            st.success(
+                f"Located: {result['city']}, {result['country']} "
+                f"({result['confidence_score']:.0%} confidence)."
+            )
+            st.json(result)
+            render_result_map(
+                {
+                    "coordinates": {
+                        "latitude": result["latitude"],
+                        "longitude": result["longitude"],
+                    }
+                }
+            )
+
+
 def render_home(developer_mode: bool = True) -> None:
     st.session_state.setdefault("is_processing", False)
     st.session_state.setdefault("analysis_pending", False)
@@ -134,6 +212,7 @@ def render_home(developer_mode: bool = True) -> None:
     st.session_state.setdefault("last_upload_key", None)
     st.session_state.setdefault("screened_image", None)
     st.session_state.setdefault("sam_result", None)
+    st.session_state.setdefault("wonder_result", None)
     is_processing = st.session_state["is_processing"]
 
     st.title("SpatialGeoGuesser")
@@ -238,16 +317,23 @@ def render_home(developer_mode: bool = True) -> None:
         st.session_state["analysis_outcome"] = None
         st.session_state["screened_image"] = None
         st.session_state["sam_result"] = None
+        st.session_state["wonder_result"] = None
 
     render_analysis_outcome(st.session_state["analysis_outcome"])
     render_sam_section(
         st.session_state["screened_image"], is_processing=is_processing
     )
+    sam_stored = st.session_state.get("sam_result") or {}
+    render_wonder_section(
+        sam_stored.get("summary"),
+        regional_hint,
+        is_processing=is_processing,
+    )
 
 
 def render_how_it_works() -> None:
     st.title("How it Works")
-    st.caption("Three steps from photo to place.")
+    st.caption("From photo to place.")
     st.markdown(
         "1. **Upload** a JPEG, PNG, or WebP photo (max 10 MB). Files are "
         "stripped of metadata and normalized to RGB at full resolution.\n"
@@ -255,7 +341,9 @@ def render_how_it_works() -> None:
         "visual data are halted, any face over 5% of the image area is "
         "rejected, smaller faces are blurred.\n"
         "3. **Add a regional hint** such as nearby landmarks or architecture.\n"
-        "4. **Analyze** to get location hypotheses based on visual clues."
+        "4. **Analyze** to get location hypotheses based on visual clues.\n"
+        "5. **Go live** (optional): segment with SAM 3.1, then geolocate "
+        "with Muse Wonder using your Meta API key."
     )
 
 

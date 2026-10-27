@@ -55,6 +55,24 @@ class SamApiError(Exception):
     """Any failure calling Meta Model API or decoding its masks."""
 
 
+def get_meta_api_key(explicit: str | None = None) -> str:
+    """Resolve the Meta key: explicit value or st.secrets['META_API_KEY']."""
+    if explicit is None:
+        try:
+            explicit = st.secrets["META_API_KEY"]
+        except KeyError as exc:
+            raise SamApiError(
+                "Missing Meta Model API key: add META_API_KEY to "
+                ".streamlit/secrets.toml."
+            ) from exc
+    if not explicit:
+        raise SamApiError(
+            "Empty Meta Model API key: set META_API_KEY in "
+            ".streamlit/secrets.toml."
+        )
+    return explicit
+
+
 class SamRetryableError(SamApiError):
     """Transient Meta API failure (HTTP 429/503/504); safe to retry."""
 
@@ -210,20 +228,7 @@ class SamSegmenter:
         backoff sleep. Streamlit callers should show RETRY_STATUS_TEXT
         ("API congested, retrying...") from that callback.
         """
-        if api_key is None:
-            try:
-                api_key = st.secrets["META_API_KEY"]
-            except KeyError as exc:
-                raise SamApiError(
-                    "Missing Meta Model API key: add META_API_KEY to "
-                    ".streamlit/secrets.toml."
-                ) from exc
-        if not api_key:
-            raise SamApiError(
-                "Empty Meta Model API key: set META_API_KEY in "
-                ".streamlit/secrets.toml."
-            )
-        key = api_key
+        key = get_meta_api_key(api_key)
         if mask_encoding not in ("one_bit", "lossless"):
             raise ValueError("mask_encoding must be 'one_bit' or 'lossless'.")
         self._api_key = key
