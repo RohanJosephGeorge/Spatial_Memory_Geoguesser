@@ -23,10 +23,16 @@ import asyncio
 import base64
 import io
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import aiohttp
 import streamlit as st
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 from meta_sam_parser import (
     CompletedOutcome,
     SegmentationMaskRecord,
@@ -39,10 +45,41 @@ from PIL import Image
 DEFAULT_BASE_URL = "https://api.meta.ai/v1"
 DEFAULT_MODEL = "sam-3.1"
 FOCUS_CONCEPTS = ("text", "architectural features", "vegetation")
+RETRYABLE_STATUS_CODES = frozenset({429, 503, 504})
+SAM_MAX_ATTEMPTS = 3  # Initial try plus up to 2 retries.
+SAM_RETRY_WAIT = wait_exponential(multiplier=2, max=10)  # 2s, then 4s.
+RETRY_STATUS_TEXT = "API congested, retrying..."
 
 
 class SamApiError(Exception):
     """Any failure calling Meta Model API or decoding its masks."""
+
+
+class SamRetryableError(SamApiError):
+    """Transient Meta API failure (HTTP 429/503/504); safe to retry."""
+
+
+def make_retry_before_sleep(on_retry: Callable[[int, float], None] | None):
+    """Build a tenacity hook reporting (attempt_number, wait_seconds)."""
+
+    def _hook(state) -> None:
+        if on_retry is not None:
+            on_retry(state.attempt_number, state.next_action.sleep)
+
+    return _hook
+
+
+def default_sam_retrying(
+    on_retry: Callable[[int, float], None] | None = None,
+) -> AsyncRetrying:
+    """Retry 429/503/504 up to 2 times with 2s, 4s exponential backoff."""
+    return AsyncRetrying(
+        stop=stop_after_attempt(SAM_MAX_ATTEMPTS),
+        wait=SAM_RETRY_WAIT,
+        retry=retry_if_exception_type(SamRetryableError),
+        reraise=True,
+        before_sleep=make_retry_before_sleep(on_retry),
+    )
 
 
 def sniff_image_mime(data: bytes) -> str:
@@ -114,7 +151,16 @@ class SamSegmenter:
         timeout: float = 120.0,
         max_concurrency: int = 3,
         session: aiohttp.ClientSession | None = None,
+        retrying: AsyncRetrying | None = None,
+        on_retry: Callable[[int, float], None] | None = None,
     ) -> None:
+        """Create a client.
+
+        retrying overrides the whole tenacity policy (test seam); on_retry
+        is called as on_retry(attempt_number, wait_seconds) before each
+        backoff sleep. Streamlit callers should show RETRY_STATUS_TEXT
+        ("API congested, retrying...") from that callback.
+        """
         if api_key is None:
             try:
                 api_key = st.secrets["META_API_KEY"]
@@ -139,6 +185,14 @@ class SamSegmenter:
         self._max_concurrency = max(1, max_concurrency)
         self._injected_session = session
         self._owned_session: aiohttp.ClientSession | None = None
+        self._retrying_override = retrying
+        self._on_retry = on_retry
+
+    def _new_retrying(self) -> AsyncRetrying:
+        """Fresh retry policy per request (safe under concurrency)."""
+        if self._retrying_override is not None:
+            return self._retrying_override
+        return default_sam_retrying(self._on_retry)
 
     async def _session(self) -> aiohttp.ClientSession:
         if self._injected_session is not None:
@@ -173,6 +227,48 @@ class SamSegmenter:
                 if data and data != "[DONE]":
                     yield json.loads(data)
 
+    async def _fetch_result(self, payload: dict, concept: str):
+        """POST once and parse the streamed result (single attempt)."""
+        session = await self._session()
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            async with session.post(
+                f"{self._base_url}/responses",
+                json=payload,
+                headers=headers,
+            ) as response:
+                if response.status != 200:
+                    try:
+                        body = (await response.text())[:500]
+                    except Exception:
+                        body = "<unreadable body>"
+                    message = (
+                        f"SAM request failed (HTTP {response.status}): {body}"
+                    )
+                    if response.status in RETRYABLE_STATUS_CODES:
+                        raise SamRetryableError(message)
+                    raise SamApiError(message)
+                try:
+                    parsed = parse_responses_stream(
+                        self._sse_events(response),
+                        image_segmentation_format(),
+                    )
+                    async with parsed:
+                        return await parsed.final_result()
+                except SamApiError:
+                    raise
+                except Exception as exc:
+                    raise SamApiError(
+                        f"SAM stream failed for concept {concept!r}: {exc}"
+                    ) from exc
+        except SamApiError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            raise SamApiError(f"SAM request failed: {exc}") from exc
+
     async def segment_concept(
         self, image_data_url: str, concept: str
     ) -> list[dict]:
@@ -192,42 +288,9 @@ class SamSegmenter:
             "stream": True,
             "metadata": {"mask_encoding": self._mask_encoding},
         }
-        session = await self._session()
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-        try:
-            async with session.post(
-                f"{self._base_url}/responses",
-                json=payload,
-                headers=headers,
-            ) as response:
-                if response.status != 200:
-                    try:
-                        body = (await response.text())[:500]
-                    except Exception:
-                        body = "<unreadable body>"
-                    raise SamApiError(
-                        f"SAM request failed (HTTP {response.status}): {body}"
-                    )
-                try:
-                    parsed = parse_responses_stream(
-                        self._sse_events(response),
-                        image_segmentation_format(),
-                    )
-                    async with parsed:
-                        result = await parsed.final_result()
-                except SamApiError:
-                    raise
-                except Exception as exc:
-                    raise SamApiError(
-                        f"SAM stream failed for concept {concept!r}: {exc}"
-                    ) from exc
-        except SamApiError:
-            raise
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            raise SamApiError(f"SAM request failed: {exc}") from exc
+        async for attempt in self._new_retrying():
+            with attempt:
+                result = await self._fetch_result(payload, concept)
         if not isinstance(result.outcome, CompletedOutcome) or result.diagnostics:
             raise SamApiError(
                 f"SAM request for {concept!r} did not complete: "

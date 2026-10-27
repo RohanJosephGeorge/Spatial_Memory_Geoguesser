@@ -1,0 +1,7 @@
+# Virtual Environment directories
+.venv/
+venv/
+__pycache__/
+
+# Streamlit Secrets
+.streamlit/

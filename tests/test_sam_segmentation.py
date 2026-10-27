@@ -18,10 +18,21 @@ import numpy as np
 from meta_sam_parser import SegmentationMaskRecord
 from meta_sam_parser._mask_codec import _encode_raster
 from PIL import Image
+from tenacity import (
+    AsyncRetrying,
+    RetryCallState,
+    Retrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_none,
+)
 
 from sam_segmentation import (
     FOCUS_CONCEPTS,
+    RETRY_STATUS_TEXT,
+    SAM_RETRY_WAIT,
     SamApiError,
+    SamRetryableError,
     SamSegmenter,
     select_latest_masks,
     sniff_image_mime,
@@ -89,11 +100,31 @@ class FakeResponse:
 class FakeSession:
     def __init__(self, response):
         self.calls = []
-        self._response = response
+        self._responses = (
+            response if isinstance(response, list) else [response]
+        )
 
     def post(self, url, **kwargs):
         self.calls.append({"url": url, **kwargs})
-        return self._response
+        index = min(len(self.calls) - 1, len(self._responses) - 1)
+        return self._responses[index]
+
+
+def fast_retrying():
+    return AsyncRetrying(
+        stop=stop_after_attempt(3),
+        wait=wait_none(),
+        retry=retry_if_exception_type(SamRetryableError),
+        reraise=True,
+    )
+
+
+def error_response(status):
+    return FakeResponse(status=status, body=f'{{"error": {{"code": {status}}}}}')
+
+
+def success_response():
+    return FakeResponse(events=success_events())
 
 
 def gradient_png(width=32, height=24):
@@ -243,6 +274,72 @@ class ErrorMappingTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SamApiError) as ctx:
             await seg.segment_image(gradient_png(), concepts="text")
         self.assertIn("401", str(ctx.exception))
+        self.assertEqual(len(session.calls), 1)
+
+
+class RetryPolicyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_congestion_statuses_retry_then_succeed(self):
+        for status in (429, 503, 504):
+            with self.subTest(status=status):
+                session = FakeSession(
+                    [error_response(status), success_response()]
+                )
+                seg = SamSegmenter(
+                    api_key="k", session=session, retrying=fast_retrying()
+                )
+                result = await seg.segment_image(
+                    gradient_png(), concepts="text"
+                )
+                self.assertEqual(len(session.calls), 2)
+                self.assertEqual(result["mask_count"], 1)
+
+    async def test_exhaustion_reraises_after_three_attempts(self):
+        session = FakeSession(error_response(503))
+        seg = SamSegmenter(
+            api_key="k", session=session, retrying=fast_retrying()
+        )
+        with self.assertRaises(SamRetryableError) as ctx:
+            await seg.segment_image(gradient_png(), concepts="text")
+        self.assertIn("503", str(ctx.exception))
+        self.assertEqual(len(session.calls), 3)
+
+    async def test_client_errors_never_retry(self):
+        for status in (400, 401, 404):
+            with self.subTest(status=status):
+                session = FakeSession(error_response(status))
+                seg = SamSegmenter(
+                    api_key="k", session=session, retrying=fast_retrying()
+                )
+                with self.assertRaises(SamApiError) as ctx:
+                    await seg.segment_image(gradient_png(), concepts="text")
+                self.assertNotIsInstance(ctx.exception, SamRetryableError)
+                self.assertEqual(len(session.calls), 1)
+
+    def test_backoff_schedule_is_two_then_four_seconds(self):
+        for attempt, expected in ((1, 2), (2, 4)):
+            state = RetryCallState(Retrying(), None, (), {})
+            state.attempt_number = attempt
+            self.assertEqual(SAM_RETRY_WAIT(state), expected)
+
+    def test_retryable_error_is_sam_api_error(self):
+        self.assertTrue(issubclass(SamRetryableError, SamApiError))
+
+    def test_retry_status_text_is_exact(self):
+        self.assertEqual(RETRY_STATUS_TEXT, "API congested, retrying...")
+
+    async def test_hook_reports_real_backoff_waits(self):
+        seen = []
+        session = FakeSession(
+            [error_response(503), error_response(429), success_response()]
+        )
+        seg = SamSegmenter(
+            api_key="k",
+            session=session,
+            on_retry=lambda attempt, wait: seen.append((attempt, wait)),
+        )
+        result = await seg.segment_image(gradient_png(), concepts="text")
+        self.assertEqual(result["mask_count"], 1)
+        self.assertEqual(seen, [(1, 2), (2, 4)])
 
     async def test_failed_stream_maps_to_sam_api_error(self):
         session = FakeSession(
