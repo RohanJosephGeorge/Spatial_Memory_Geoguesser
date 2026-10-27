@@ -1,11 +1,17 @@
 """Basic SpatialGeoGuesser upload app."""
 
 import os
+import time
 
 import streamlit as st
 
+from analysis import (
+    AnalysisError,
+    analyze_via_backend,
+    mock_analysis_result,
+)
 from face_screening import screen_image_faces
-from file_sanitizer import sanitize_uploaded_image
+from file_sanitizer import encode_clean_jpeg, sanitize_uploaded_image
 from image_quality import has_sufficient_visual_data
 
 try:
@@ -96,7 +102,7 @@ def inject_heading_styles() -> None:
     )
 
 
-def render_home() -> None:
+def render_home(developer_mode: bool = True) -> None:
     st.title("SpatialGeoGuesser")
     st.caption("Upload a memory photo and add an optional regional hint.")
     st.space("small")
@@ -180,16 +186,32 @@ def render_home() -> None:
                 if not data_ok:
                     st.warning(data_message)
                 else:
-                    status, face_message, _ = screen_image_faces(rgb_image)
+                    status, face_message, safe_image = screen_image_faces(
+                        rgb_image
+                    )
                     if status in ("rejected", "error"):
                         st.warning(f"Cannot analyze: {face_message}")
-                    else:
-                        hint_text = regional_hint.strip() or "(no hint provided)"
-                        st.info(
-                            f"Dummy action: would analyze privacy-screened "
-                            f"'{uploaded_file.name}' ({status}) "
-                            f"with regional hint: {hint_text}."
+                    elif developer_mode:
+                        with st.spinner("Analyzing memory (mock data)..."):
+                            time.sleep(2)
+                        result = mock_analysis_result(
+                            uploaded_file.name, regional_hint
                         )
+                        st.success("Mock analysis complete (no backend call).")
+                        st.json(result)
+                    else:
+                        try:
+                            with st.spinner("Analyzing memory..."):
+                                result = analyze_via_backend(
+                                    encode_clean_jpeg(safe_image),
+                                    uploaded_file.name,
+                                    regional_hint,
+                                )
+                        except AnalysisError as exc:
+                            st.error(str(exc))
+                        else:
+                            st.success("Analysis complete.")
+                            st.json(result)
 
 
 def render_how_it_works() -> None:
@@ -221,6 +243,14 @@ def render_privacy_safety() -> None:
 def main() -> None:
     st.set_page_config(page_title="SpatialGeoGuesser", layout="centered")
     inject_heading_styles()
+
+    developer_mode = st.sidebar.toggle(
+        "Developer Mode (Use Mock Data)",
+        value=True,
+        key="developer_mode",
+        help="When on, Analyze Memory returns instant mock data instead of "
+        "calling the FastAPI backend.",
+    )
 
     if option_menu is None:
         st.error(
@@ -257,7 +287,7 @@ def main() -> None:
     )
 
     if selected == "Home (Upload)":
-        render_home()
+        render_home(developer_mode)
     elif selected == "How it Works":
         render_how_it_works()
     else:
