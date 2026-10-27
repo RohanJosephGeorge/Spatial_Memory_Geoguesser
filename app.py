@@ -4,6 +4,8 @@ import os
 
 import streamlit as st
 
+from face_screening import preprocess_uploaded_image
+
 try:
     import streamlit_shadcn_ui as ui
 except ImportError:  # pragma: no cover
@@ -77,9 +79,25 @@ def is_valid_image(uploaded_file) -> tuple[bool, str]:
     return True, "Valid image."
 
 
+def inject_heading_styles() -> None:
+    st.markdown(
+        """
+        <style>
+        h1, h2, h3 {
+            font-weight: 600 !important;
+            letter-spacing: -0.5px !important;
+            font-family: 'Inter', system-ui, -apple-system, sans-serif !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_home() -> None:
     st.title("SpatialGeoGuesser")
     st.caption("Upload a memory photo and add an optional regional hint.")
+    st.space("small")
 
     if ui is None:
         st.error(
@@ -95,6 +113,7 @@ def render_home() -> None:
         key="upload_card",
     )
 
+    st.space("small")
     with st.container(border=True):
         uploaded_file = st.file_uploader(
             "Upload an image",
@@ -102,30 +121,53 @@ def render_home() -> None:
             accept_multiple_files=False,
             help="JPEG, PNG, or WebP up to 10 MB.",
         )
+        st.space("small")
         regional_hint = st.text_input(
             "Regional hint",
             placeholder="e.g. coastal town, temple architecture, alpine village",
         )
+        st.space("small")
         analyze_clicked = ui.button("Analyze Memory", key="analyze_btn")
 
     if uploaded_file is not None:
         valid, message = is_valid_image(uploaded_file)
-        if valid:
-            st.success(message)
-            st.image(uploaded_file, caption="Preview", use_container_width=True)
-        else:
+        if not valid:
             st.error(message)
+        else:
+            status, face_message, safe_image = preprocess_uploaded_image(
+                uploaded_file
+            )
+            if status == "rejected":
+                st.error(face_message)
+            elif status == "error":
+                st.error(face_message)
+            else:
+                if status == "blurred":
+                    st.warning(face_message)
+                else:
+                    st.success(f"{message} {face_message}")
+                st.image(
+                    safe_image, caption="Privacy-safe preview",
+                    use_container_width=True,
+                )
 
     if analyze_clicked:
         valid, message = is_valid_image(uploaded_file)
         if not valid:
             st.warning(f"Cannot analyze yet: {message}")
         else:
-            hint_text = regional_hint.strip() or "(no hint provided)"
-            st.info(
-                f"Dummy action: would analyze '{uploaded_file.name}' "
-                f"with regional hint: {hint_text}."
+            status, face_message, safe_image = preprocess_uploaded_image(
+                uploaded_file
             )
+            if status in ("rejected", "error"):
+                st.warning(f"Cannot analyze: {face_message}")
+            else:
+                hint_text = regional_hint.strip() or "(no hint provided)"
+                st.info(
+                    f"Dummy action: would analyze privacy-screened "
+                    f"'{uploaded_file.name}' ({status}) "
+                    f"with regional hint: {hint_text}."
+                )
 
 
 def render_how_it_works() -> None:
@@ -133,8 +175,10 @@ def render_how_it_works() -> None:
     st.caption("Three steps from photo to place.")
     st.markdown(
         "1. **Upload** a JPEG, PNG, or WebP photo (max 10 MB).\n"
-        "2. **Add a regional hint** such as nearby landmarks or architecture.\n"
-        "3. **Analyze** to get location hypotheses based on visual clues."
+        "2. **Face screening** runs automatically: any face over 5% of the "
+        "image area is rejected, smaller faces are blurred.\n"
+        "3. **Add a regional hint** such as nearby landmarks or architecture.\n"
+        "4. **Analyze** to get location hypotheses based on visual clues."
     )
 
 
@@ -152,6 +196,7 @@ def render_privacy_safety() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="SpatialGeoGuesser", layout="centered")
+    inject_heading_styles()
 
     if option_menu is None:
         st.error(
