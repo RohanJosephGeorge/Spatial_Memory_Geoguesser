@@ -13,11 +13,13 @@ so a deployment-specific id can be passed instead.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 from collections.abc import Callable, Sequence
 
 import aiohttp
+from PIL import Image
 
 from sam_segmentation import (
     DEFAULT_BASE_URL,
@@ -25,12 +27,16 @@ from sam_segmentation import (
     SamApiError,
     SamRetryableError,
     default_sam_retrying,
+    encode_png_bytes,
     format_visual_breakdown,
     get_meta_api_key,
+    sniff_image_mime,
     summarize_masks,
 )
 
 DEFAULT_REASONING_MODEL = "muse-wonder-1.0"
+REASONING_EFFORT = "max"
+MIN_MASKS_FOR_FULL_INVENTORY = 3
 REQUIRED_KEYS = (
     "latitude",
     "longitude",
@@ -45,28 +51,34 @@ MAX_REASONING_TOKENS = 250
 # Authoritative strict rules for the geolocation prompt.
 # build_spatial_prompt() also accepts strict_rules per call to override.
 DEFAULT_STRICT_RULES = (
-    "Privacy Override: You may receive images where small background faces "
-    "or license plates have been intentionally blurred out for safety. Do "
-    "not let these blurred regions trigger a Privacy Override. Ignore the "
-    "blurred spots and focus on the surrounding architecture. Only halt "
-    "analysis and output null if you detect a clear, unblurred human face.",
-    "Synthetic Check: If the image appears to be from a video game, 3D "
-    "render, or AI generator, output null coordinates and state 'Synthetic "
-    "image detected'.",
-    "Indoor/Featureless Check: If SAM 3.1 segmentation reveals only indoor "
-    "furniture or lacks identifiable architectural or botanical clues, DO "
-    "NOT guess. Output null coordinates and state 'Not enough distinct "
-    "features'.",
-    "Text Override: The user's regional hint is secondary to visual "
-    "evidence. If visual clues heavily contradict the hint, ignore the hint.",
-    "Privacy Radius: Do not output exact coordinates for private "
-    "residences. Snap the final coordinates to the nearest public "
-    "intersection. Set precision_level to either 'Public Landmark', "
-    "'Street Level', or 'Neighborhood Radius'.",
+    "Exhaustive Visual Synthesis: Analyze every micro-detail directly from "
+    "the image and provided masks: sun position/shadow angle, driving side, "
+    "license plate aspect ratios, road paint colors, utility pole "
+    "structures, foliage/soil types, architectural rooflines, and regional "
+    "hints.",
+    "Best-Effort Coordinates (No Easy Quits): DO NOT output null "
+    "coordinates unless the image is completely pitch black or synthetic. "
+    "If exact street-level accuracy cannot be determined, make your best "
+    "probabilistic deduction based on regional geography, climate, and "
+    "architecture.",
+    "Graduated Precision Scale: Map precision_level dynamically to one of: "
+    "'Public Landmark' (within 50m), 'Street Level' (within 200m), "
+    "'Neighborhood Radius' (within 1km), 'City Level' (within 10km), or "
+    "'State / Region Radius' (within 50km+).",
+    "Confidence Calibration: Reflect your certainty in the confidence "
+    "score (e.g., 0.35 for regional guess, 0.95 for exact landmark), but "
+    "still provide valid coordinates for the regional center or most "
+    "likely intersection.",
 )
-PRECISION_LEVELS = ("Public Landmark", "Street Level", "Neighborhood Radius")
+PRECISION_LEVELS = (
+    "Public Landmark",
+    "Street Level",
+    "Neighborhood Radius",
+    "City Level",
+    "State / Region Radius",
+)
 HALT_PRECISION = "Unknown"
-HALT_PHRASES = ("Synthetic image detected", "Not enough distinct features")
+HALT_PHRASES = ("Synthetic image detected", "Pitch black image")
 GEOLOCATION_JSON_SCHEMA = {
     "type": "object",
     "properties": {
@@ -99,19 +111,66 @@ def estimate_tokens(text: str) -> int:
     return len(text.split())
 
 
+FALLBACK_INSTRUCTION = (
+    "FALLBACK (sparse segmentation): the mask inventory above is empty or "
+    "minimal. Analyze the attached raw image directly for geolocation "
+    "evidence and do not output null coordinates solely because "
+    "segmentation masks are missing."
+)
+ATTACHED_IMAGE_NOTE = (
+    "NOTE: the full-resolution raw image is attached alongside this "
+    "inventory; use it to corroborate or extend the mask evidence."
+)
+OCR_INSTRUCTION = (
+    "Use the Local Signage, Text & Script masks to locate text regions, "
+    "then actively extract and decode text micro-details from the attached "
+    "raw image: shop headers, street signs, highway numbers, vehicle "
+    "license plate state prefixes (e.g. 'KL' for Kerala, 'MH' for "
+    "Maharashtra), domain extensions (e.g. .in, .co.uk), and phone area "
+    "codes. Recognize regional scripts (e.g. Malayalam, Tamil, Hindi, "
+    "Cyrillic, Arabic, Hangul) and explicitly identify the language and "
+    "geographic region associated with each script."
+)
+TEXT_ANCHOR_INSTRUCTION = (
+    "If legible text, shop names, or district names are detected, "
+    "prioritize them as Tier-1 primary anchor points. Use the text to "
+    "narrow down the specific district, town, or transit corridor before "
+    "falling back to landscape cues."
+)
+TRIANGULATION_HEURISTICS = (
+    "Solar Geometry & Shadow Analysis: Evaluate shadow angle and light "
+    "direction relative to visible structures and trees to estimate the "
+    "approximate hemisphere (Northern vs. Southern) and latitude alignment.",
+    "Infrastructure Fingerprinting: Classify utility pole architecture "
+    "(concrete rectangular RCC posts, wooden cross-arms, steel lattice "
+    "towers, cylindrical steel); check driving side (left vs. right-hand "
+    "traffic), curb paint patterns (yellow/black, red/white, plain "
+    "concrete), and asphalt vs. dirt road composition.",
+    "Vegetation & Biome Indexing: Match plant species (rubber plantation "
+    "vs. coconut palm vs. pine forest) and soil color (red laterite, black "
+    "soil, sandy coastal) to specific climatic sub-zones.",
+)
+
+
 def build_spatial_prompt(
     sam_masks,
     regional_hint: str,
     *,
     strict_rules: Sequence[str] | None = None,
     max_reasoning_tokens: int = MAX_REASONING_TOKENS,
+    has_image: bool = False,
 ) -> str:
     """Format SAM masks + hint into a strict geolocation prompt.
 
     sam_masks accepts summarize_masks() output or a full segment_image()
     result dict (summarized automatically; raster bytes never enter the
     prompt). Every mask also appears in a VISUAL BREAKDOWN section with
-    its category, normalized box, and spatial position.
+    its category, normalized box, and spatial position. When has_image is
+    True, an empty or minimal inventory adds a fallback instruction to
+    analyze the attached raw image directly instead of halting, and a TEXT
+    DECODING section directs OCR of signage, codes, and regional scripts
+    with Tier-1 text anchoring. A STRUCTURAL TRIANGULATION section always
+    follows with solar, infrastructure, and biome deduction heuristics.
     """
     if isinstance(sam_masks, dict):
         sam_masks = summarize_masks(sam_masks)
@@ -123,31 +182,46 @@ def build_spatial_prompt(
     summaries = list(sam_masks)
     masks_json = json.dumps(summaries, indent=2)
     breakdown = format_visual_breakdown(summaries)
-    return f"""You are a geospatial reasoning engine. Geolocate the photo from its SAM 3.1 segmentation masks and a regional hint.
+    triangulation = "\n".join(f"- {item}" for item in TRIANGULATION_HEURISTICS)
+    visual_note = ""
+    ocr_section = ""
+    if has_image:
+        if len(summaries) < MIN_MASKS_FOR_FULL_INVENTORY:
+            visual_note = f"\n{FALLBACK_INSTRUCTION}\n"
+        else:
+            visual_note = f"\n{ATTACHED_IMAGE_NOTE}\n"
+        ocr_section = (
+            f"TEXT DECODING (OCR):\n{OCR_INSTRUCTION}\n"
+            f"{TEXT_ANCHOR_INSTRUCTION}\n\n"
+        )
+    return f"""You are an elite, world-class reverse geolocation expert and spatial reasoning engine. Your goal is to pinpoint the location of any image using all available visual and contextual evidence, making educated, highly reasoned deductions even when features are subtle.
 
-Reason in multiple steps: (1) inventory the visible evidence per concept; (2) combine independent clues into candidate regions; (3) eliminate candidates inconsistent with any clue; (4) commit to one fix with a calibrated confidence score.
+Reason in multiple hypotheses: (1) generate 3 distinct candidate locations (Candidate A, B, C) from the visual evidence; (2) score every candidate against all extracted features (architecture, flora, soil, infrastructure, text) in an evidence matrix and eliminate candidates that violate key constraints; (3) assign a confidence weighting to the surviving winner and output its exact geographic center or landmark coordinates.
 
 SEGMENTATION MASKS (concept, object id, box, size, confidence):
 {masks_json}
 
 VISUAL BREAKDOWN (label, category, normalized box, position):
 {breakdown}
+{visual_note}
+{ocr_section}STRUCTURAL TRIANGULATION:
+{triangulation}
 
 REGIONAL HINT: {hint}
 
-STRICT RULES:
+STRICT DEDUCTION RULES:
 {rules_text}
 
 REQUIRED OUTPUT: a single JSON object with exactly these keys:
 - latitude: number between -90 and 90, or null when halting
 - longitude: number between -180 and 180, or null when halting
-- city: non-empty string ("" when halting)
-- country: non-empty string ("" when halting)
-- reasoning_steps: non-empty array of concise strings, under {max_reasoning_tokens} tokens in total
+- city: string ("" when the exact city is unknown or when halting)
+- country: string ("" when the exact country is unknown or when halting)
+- reasoning_steps: non-empty array of concise strings, under {max_reasoning_tokens} tokens in total, narrating the 3 candidates, the evidence-matrix elimination, and the winning selection
 - confidence_score: number between 0 and 1 (exactly 0.0 when halting)
-- precision_level: one of 'Public Landmark', 'Street Level', 'Neighborhood Radius' ('Unknown' when halting)
+- precision_level: one of 'Public Landmark', 'Street Level', 'Neighborhood Radius', 'City Level', 'State / Region Radius' ('Unknown' when halting)
 
-HALT FORMAT: when a strict rule halts analysis, output latitude null, longitude null, city "", country "", confidence_score 0.0, precision_level "Unknown", and put the state phrase (e.g. 'Synthetic image detected', 'Not enough distinct features') as the first reasoning step. Never output 0.0, 0.0 as a placeholder."""
+HALT FORMAT: halt only when the image is completely pitch black or synthetic. Then output latitude null, longitude null, city "", country "", confidence_score 0.0, precision_level "Unknown", and put the state phrase (e.g. 'Synthetic image detected', 'Pitch black image') as the first reasoning step. Never output 0.0, 0.0 as a placeholder."""
 
 
 def extract_output_text(response: dict) -> str:
@@ -203,7 +277,9 @@ def parse_reasoning_result(text: str) -> dict:
     """Parse and strictly validate the model's JSON geolocation result.
 
     Halted results use the null convention: null coordinates, empty
-    city/country, 0.0 confidence, and "Unknown" precision.
+    city/country, 0.0 confidence, and "Unknown" precision. Non-halted
+    results keep their coordinates even when city/country are empty
+    strings (coarse regional guesses); only the string type is enforced.
     """
     parsed = _load_json_object(text)
     missing = [key for key in REQUIRED_KEYS if key not in parsed]
@@ -239,8 +315,6 @@ def parse_reasoning_result(text: str) -> dict:
             raise SpatialReasoningError(
                 f"{key} must be empty when coordinates are null."
             )
-        if not halted and not value.strip():
-            raise SpatialReasoningError(f"{key} must be a non-empty string.")
     steps = parsed["reasoning_steps"]
     if (
         not isinstance(steps, list)
@@ -282,6 +356,63 @@ def check_null_island(parsed: dict) -> dict:
             "Location Unknown: the model returned coordinates 0.0, 0.0."
         )
     return parsed
+
+
+def encode_image_data_url(image: Image.Image | bytes) -> str:
+    """Encode a PIL image or raw image bytes as a base64 data URL."""
+    if isinstance(image, Image.Image):
+        data = encode_png_bytes(image)
+        mime = "image/png"
+    elif isinstance(image, (bytes, bytearray)):
+        data = bytes(image)
+        try:
+            mime = sniff_image_mime(data)
+        except ValueError as exc:
+            raise SpatialReasoningError(
+                f"Cannot attach image to reasoning request: {exc}"
+            ) from exc
+    else:
+        raise SpatialReasoningError(
+            "Reasoning image must be a PIL image or raw image bytes, "
+            f"got {type(image).__name__}."
+        )
+    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def build_reasoning_payload(
+    prompt: str,
+    *,
+    model: str = DEFAULT_REASONING_MODEL,
+    image_data_url: str | None = None,
+) -> dict:
+    """Build the Meta Responses API payload for Muse Wonder.
+
+    The prompt carries the SAM mask inventory; image_data_url attaches
+    the raw image as a second multimodal input part when provided.
+    Reasoning always runs at maximum effort.
+    """
+    content: list[dict] = [{"type": "input_text", "text": prompt}]
+    if image_data_url is not None:
+        content.append({"type": "input_image", "image_url": image_data_url})
+    return {
+        "model": model,
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": content,
+            }
+        ],
+        "stream": False,
+        "reasoning": {"effort": REASONING_EFFORT},
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "Geolocation",
+                "schema": GEOLOCATION_JSON_SCHEMA,
+            }
+        },
+    }
 
 
 class SpatialReasoner:
@@ -374,29 +505,28 @@ class SpatialReasoner:
         regional_hint: str,
         *,
         strict_rules: Sequence[str] | None = None,
+        image: Image.Image | bytes | None = None,
     ) -> dict:
-        """Run multi-step spatial reasoning; return the validated result."""
+        """Run multi-step spatial reasoning; return the validated result.
+
+        image attaches the raw photo as a second multimodal input part
+        next to the SAM mask inventory. Reasoning always proceeds, even
+        with zero masks: an empty inventory plus an attached image adds
+        a fallback instruction to analyze the raw image directly.
+        """
         prompt = build_spatial_prompt(
-            sam_masks, regional_hint, strict_rules=strict_rules
+            sam_masks,
+            regional_hint,
+            strict_rules=strict_rules,
+            has_image=image is not None,
         )
-        payload = {
-            "model": self._model,
-            "input": [
-                {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": prompt}],
-                }
-            ],
-            "stream": False,
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "Geolocation",
-                    "schema": GEOLOCATION_JSON_SCHEMA,
-                }
-            },
-        }
+        payload = build_reasoning_payload(
+            prompt,
+            model=self._model,
+            image_data_url=(
+                encode_image_data_url(image) if image is not None else None
+            ),
+        )
         async for attempt in self._new_retrying():
             with attempt:
                 data = await self._fetch_json(payload)

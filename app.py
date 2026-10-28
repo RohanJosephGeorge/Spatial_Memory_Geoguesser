@@ -127,8 +127,10 @@ PRECISION_RADII_METERS = {
     "Public Landmark": 50,
     "Street Level": 100,
     "Neighborhood Radius": 500,
+    "City Level": 10000,
+    "State / Region Radius": 50000,
 }
-DEFAULT_RADIUS_METERS = 500
+DEFAULT_RADIUS_METERS = 50000
 FOLIUM_DARK_TILES = "CartoDB dark_matter"
 CIRCLE_FILL_OPACITY = 0.3
 WONDER_MAP_HEIGHT = 400
@@ -219,7 +221,7 @@ async def _run_live_pipeline(safe_image, regional_hint, on_retry=None):
         sam_result = await segmenter.segment_image(safe_image)
     async with SpatialReasoner(on_retry=on_retry) as reasoner:
         return await reasoner.reason(
-            summarize_masks(sam_result), regional_hint
+            summarize_masks(sam_result), regional_hint, image=safe_image
         )
 
 

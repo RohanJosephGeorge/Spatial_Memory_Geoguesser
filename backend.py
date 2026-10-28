@@ -163,7 +163,9 @@ if FastAPI is not None:
                 sam_result = await segmenter.segment_image(image)
             async with SpatialReasoner(api_key=api_key) as reasoner:
                 wonder_result = await reasoner.reason(
-                    summarize_masks(sam_result), payload.regional_hint
+                    summarize_masks(sam_result),
+                    payload.regional_hint,
+                    image=image,
                 )
         except LocationUnknownError as exc:
             raise HTTPException(status_code=422, detail=str(exc))

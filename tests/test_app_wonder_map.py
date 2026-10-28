@@ -41,9 +41,15 @@ class PrecisionRadiusTests(unittest.TestCase):
     def test_public_landmark_is_50m(self):
         self.assertEqual(app.precision_to_radius("Public Landmark"), 50)
 
+    def test_city_level_is_10km(self):
+        self.assertEqual(app.precision_to_radius("City Level"), 10000)
+
+    def test_state_region_radius_is_50km(self):
+        self.assertEqual(app.precision_to_radius("State / Region Radius"), 50000)
+
     def test_unknown_level_fails_wide(self):
-        self.assertEqual(app.precision_to_radius("Unknown"), 500)
-        self.assertEqual(app.precision_to_radius(None), 500)
+        self.assertEqual(app.precision_to_radius("Unknown"), 50000)
+        self.assertEqual(app.precision_to_radius(None), 50000)
 
 
 class BuildWonderFoliumMapTests(unittest.TestCase):

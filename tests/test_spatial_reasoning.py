@@ -4,10 +4,12 @@ Run: python -m unittest discover -s tests -v
 Requires aiohttp and tenacity. No network: HTTP is fully mocked.
 """
 
+import io
 import json
 import unittest
 from unittest.mock import patch
 
+from PIL import Image
 from tenacity import (
     AsyncRetrying,
     retry_if_exception_type,
@@ -15,14 +17,21 @@ from tenacity import (
     wait_none,
 )
 
+from backend import build_frontend_result, round_wonder_coordinates
 from sam_segmentation import SamRetryableError
 from spatial_reasoning import (
+    PRECISION_LEVELS,
     REQUIRED_KEYS,
+    REASONING_EFFORT,
+    TEXT_ANCHOR_INSTRUCTION,
+    TRIANGULATION_HEURISTICS,
     LocationUnknownError,
     SpatialReasoner,
     SpatialReasoningError,
+    build_reasoning_payload,
     build_spatial_prompt,
     check_null_island,
+    encode_image_data_url,
     estimate_tokens,
     extract_output_text,
     parse_reasoning_result,
@@ -164,18 +173,43 @@ class PromptTests(unittest.TestCase):
     def test_prompt_contains_all_strict_rules(self):
         prompt = build_spatial_prompt([], "x")
         for phrase in (
-            "Privacy Override",
-            "Synthetic Check",
-            "Synthetic image detected",
-            "Indoor/Featureless Check",
-            "Not enough distinct features",
-            "Text Override",
-            "Privacy Radius",
+            "Exhaustive Visual Synthesis",
+            "Best-Effort Coordinates",
+            "Graduated Precision Scale",
+            "Confidence Calibration",
             "Public Landmark",
             "Street Level",
             "Neighborhood Radius",
+            "City Level",
+            "State / Region Radius",
         ):
             self.assertIn(phrase, prompt)
+
+
+class AggressivePromptTests(unittest.TestCase):
+    def test_elite_expert_identity(self):
+        prompt = build_spatial_prompt([], "x")
+        self.assertIn("reverse geolocation expert", prompt)
+        self.assertIn("STRICT DEDUCTION RULES", prompt)
+
+    def test_no_easy_quits_and_narrowed_halt(self):
+        prompt = build_spatial_prompt([], "x")
+        self.assertIn("pitch black", prompt)
+        self.assertIn("Synthetic image detected", prompt)
+        self.assertNotIn("Not enough distinct features", prompt)
+        self.assertNotIn("DO NOT guess", prompt)
+
+    def test_graduated_scale_has_five_levels(self):
+        self.assertEqual(
+            PRECISION_LEVELS,
+            (
+                "Public Landmark",
+                "Street Level",
+                "Neighborhood Radius",
+                "City Level",
+                "State / Region Radius",
+            ),
+        )
 
 
 class ParseTests(unittest.TestCase):
@@ -225,6 +259,47 @@ class ParseTests(unittest.TestCase):
             parse_reasoning_result(json.dumps(halt_payload())), halt_payload()
         )
 
+    def test_coarse_levels_with_empty_city_keep_coordinates(self):
+        for level in ("City Level", "State / Region Radius"):
+            with self.subTest(level=level):
+                payload = good_payload()
+                payload["city"] = ""
+                payload["precision_level"] = level
+                payload["confidence_score"] = 0.35
+                parsed = parse_reasoning_result(json.dumps(payload))
+                self.assertEqual(parsed["latitude"], 48.8584)
+                self.assertEqual(parsed["longitude"], 2.2945)
+                self.assertEqual(parsed["city"], "")
+                self.assertEqual(parsed["precision_level"], level)
+
+    def test_empty_country_with_valid_coordinates_passes(self):
+        payload = good_payload()
+        payload["country"] = ""
+        payload["precision_level"] = "State / Region Radius"
+        parsed = parse_reasoning_result(json.dumps(payload))
+        self.assertEqual(parsed["longitude"], 2.2945)
+
+    def test_non_string_city_still_rejected(self):
+        payload = good_payload()
+        payload["city"] = None
+        with self.assertRaises(SpatialReasoningError):
+            parse_reasoning_result(json.dumps(payload))
+
+    def test_parsed_coarse_result_flows_to_frontend_shape(self):
+        payload = good_payload()
+        payload["city"] = ""
+        payload["precision_level"] = "State / Region Radius"
+        payload["confidence_score"] = 0.4
+        parsed = parse_reasoning_result(json.dumps(payload))
+        result = build_frontend_result(
+            round_wonder_coordinates(parsed), "m.jpg", ""
+        )
+        self.assertEqual(
+            result["coordinates"], {"latitude": 48.858, "longitude": 2.295}
+        )
+        self.assertEqual(result["city"], "")
+        self.assertEqual(result["precision"], "State / Region Radius")
+
     def test_mixed_null_coordinates_rejected(self):
         payload = halt_payload()
         payload["latitude"] = 48.8
@@ -246,7 +321,13 @@ class ParseTests(unittest.TestCase):
                     parse_reasoning_result(json.dumps(payload))
 
     def test_precision_levels_enforced(self):
-        for level in ("Public Landmark", "Street Level", "Neighborhood Radius"):
+        for level in (
+            "Public Landmark",
+            "Street Level",
+            "Neighborhood Radius",
+            "City Level",
+            "State / Region Radius",
+        ):
             with self.subTest(level=level):
                 payload = good_payload()
                 payload["precision_level"] = level
@@ -383,6 +464,199 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(Exception) as ctx:
                 SpatialReasoner(api_key=None)
         self.assertIn("META_API_KEY", str(ctx.exception))
+
+
+def tiny_png_bytes():
+    buf = io.BytesIO()
+    Image.new("RGB", (4, 3), (10, 200, 90)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+class DualInputPayloadTests(unittest.TestCase):
+    def test_reasoning_effort_is_max(self):
+        self.assertEqual(REASONING_EFFORT, "max")
+        payload = build_reasoning_payload("prompt")
+        self.assertEqual(payload["reasoning"], {"effort": "max"})
+
+    def test_text_only_payload_keeps_single_text_part(self):
+        payload = build_reasoning_payload("prompt", model="custom-model")
+        self.assertEqual(payload["model"], "custom-model")
+        self.assertFalse(payload["stream"])
+        content = payload["input"][0]["content"]
+        self.assertEqual(len(content), 1)
+        self.assertEqual(content[0]["type"], "input_text")
+        self.assertEqual(content[0]["text"], "prompt")
+
+    def test_image_payload_pairs_text_with_raw_image(self):
+        url = "data:image/png;base64,AAA"
+        payload = build_reasoning_payload("prompt", image_data_url=url)
+        content = payload["input"][0]["content"]
+        self.assertEqual(len(content), 2)
+        self.assertEqual(content[0]["type"], "input_text")
+        self.assertEqual(content[1]["type"], "input_image")
+        self.assertEqual(content[1]["image_url"], url)
+        self.assertEqual(payload["reasoning"], {"effort": "max"})
+
+    def test_encode_pil_image_to_png_data_url(self):
+        url = encode_image_data_url(Image.new("RGB", (4, 3), (1, 2, 3)))
+        self.assertTrue(url.startswith("data:image/png;base64,"))
+
+    def test_encode_png_bytes_to_data_url(self):
+        url = encode_image_data_url(tiny_png_bytes())
+        self.assertTrue(url.startswith("data:image/png;base64,"))
+
+    def test_encode_rejects_garbage_and_wrong_types(self):
+        with self.assertRaises(SpatialReasoningError):
+            encode_image_data_url(b"not an image")
+        with self.assertRaises(SpatialReasoningError):
+            encode_image_data_url("data:image/png;base64,AAA")
+
+    def test_empty_masks_with_image_falls_back_to_raw_image(self):
+        prompt = build_spatial_prompt([], "hint", has_image=True)
+        self.assertIn("0 masks", prompt)
+        self.assertIn("attached raw image directly", prompt)
+        self.assertIn("REQUIRED OUTPUT", prompt)
+
+    def test_minimal_masks_with_image_falls_back_to_raw_image(self):
+        prompt = build_spatial_prompt(sample_summary(), "hint", has_image=True)
+        self.assertIn("attached raw image directly", prompt)
+
+    def test_rich_inventory_with_image_notes_attachment(self):
+        masks = sample_summary() + [dict(sample_summary()[0], object_id="2")]
+        prompt = build_spatial_prompt(masks, "hint", has_image=True)
+        self.assertNotIn("attached raw image directly", prompt)
+        self.assertIn("attached alongside", prompt)
+
+    def test_no_image_mentioned_without_attached_image(self):
+        prompt = build_spatial_prompt([], "hint")
+        self.assertNotIn("attached raw image", prompt)
+        self.assertNotIn("attached alongside", prompt)
+
+
+class OcrPromptTests(unittest.TestCase):
+    def test_anchor_instruction_is_verbatim(self):
+        self.assertEqual(
+            TEXT_ANCHOR_INSTRUCTION,
+            "If legible text, shop names, or district names are detected, "
+            "prioritize them as Tier-1 primary anchor points. Use the text "
+            "to narrow down the specific district, town, or transit "
+            "corridor before falling back to landscape cues.",
+        )
+
+    def test_image_prompt_directs_text_and_code_decoding(self):
+        prompt = build_spatial_prompt([], "hint", has_image=True)
+        for phrase in (
+            "TEXT DECODING",
+            "shop headers",
+            "highway numbers",
+            "license plate",
+            "KL",
+            "Kerala",
+            "MH",
+            "Maharashtra",
+            ".in",
+            "area codes",
+            "Malayalam",
+            "Tamil",
+            "Hindi",
+            "Cyrillic",
+            "Arabic",
+            "Hangul",
+            "language",
+            "geographic region",
+            "Tier-1 primary anchor points",
+            "transit corridor",
+        ):
+            self.assertIn(phrase, prompt)
+
+    def test_no_ocr_section_without_attached_image(self):
+        prompt = build_spatial_prompt([], "hint")
+        self.assertNotIn("TEXT DECODING", prompt)
+        self.assertNotIn("Tier-1", prompt)
+
+
+class MultiHypothesisPromptTests(unittest.TestCase):
+    def test_protocol_generates_three_candidates(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "3 distinct candidate",
+            "Candidate A",
+            "evidence matrix",
+            "eliminate",
+            "confidence weighting",
+            "geographic center",
+        ):
+            self.assertIn(phrase, prompt)
+
+    def test_reasoning_steps_spec_requires_hypothesis_trace(self):
+        prompt = build_spatial_prompt([], "hint")
+        self.assertIn("candidates", prompt)
+        self.assertIn("elimination", prompt)
+
+    def test_handler_passes_multi_candidate_response_through(self):
+        response = {
+            "latitude": 9.4981,
+            "longitude": 76.3388,
+            "city": "Alappuzha",
+            "country": "India",
+            "reasoning_steps": [
+                "Candidate A: Alappuzha, Kerala; Candidate B: Mangalore, "
+                "Karnataka; Candidate C: Goa.",
+                "Evidence matrix: laterite soil and coconut palms fit A; "
+                "driving side eliminates C.",
+                "Winner: Candidate A with 0.62 confidence weighting.",
+                "Centroid fixed on the Alappuzha district center.",
+            ],
+            "confidence_score": 0.62,
+            "precision_level": "City Level",
+        }
+        parsed = parse_reasoning_result(json.dumps(response))
+        self.assertEqual(parsed["latitude"], 9.4981)
+        self.assertEqual(parsed["longitude"], 76.3388)
+        self.assertEqual(parsed["city"], "Alappuzha")
+        self.assertEqual(len(parsed["reasoning_steps"]), 4)
+
+
+class TriangulationPromptTests(unittest.TestCase):
+    def test_three_heuristics_defined(self):
+        self.assertEqual(len(TRIANGULATION_HEURISTICS), 3)
+
+    def test_solar_geometry_heuristics(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "STRUCTURAL TRIANGULATION",
+            "Solar Geometry",
+            "shadow angle",
+            "light direction",
+            "hemisphere",
+            "latitude",
+        ):
+            self.assertIn(phrase, prompt)
+
+    def test_infrastructure_fingerprinting_heuristics(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "Infrastructure Fingerprinting",
+            "RCC",
+            "lattice",
+            "driving side",
+            "curb",
+            "asphalt",
+        ):
+            self.assertIn(phrase, prompt)
+
+    def test_vegetation_biome_indexing_heuristics(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "Vegetation",
+            "Biome",
+            "rubber plantation",
+            "coconut palm",
+            "pine",
+            "laterite",
+            "climatic sub-zones",
+        ):
+            self.assertIn(phrase, prompt)
 
 
 if __name__ == "__main__":
