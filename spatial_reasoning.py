@@ -150,6 +150,118 @@ TRIANGULATION_HEURISTICS = (
     "vs. coconut palm vs. pine forest) and soil color (red laterite, black "
     "soil, sandy coastal) to specific climatic sub-zones.",
 )
+COASTAL_INDICATORS = (
+    "Sand & Soil Composition: Differentiate between fine white sand, "
+    "coarse golden/yellow sand, black volcanic/mineral sand (e.g. "
+    "Kollam/Varkala), and muddy estuarine silt.",
+    "Coastal Topography: Identify cliff structures (laterite red cliffs "
+    "vs. rocky outcrops), sea walls, tetrapods, granite breakwaters, and "
+    "sand dune vegetation (spinifex, casuarina trees).",
+    "Marine Craft & Fishing Gear: Recognize local boat designs "
+    "(catamarans, wooden outboard canoes, Chinese fishing nets, trawlers) "
+    "and state-specific boat painting schemes.",
+    "Water Optics: Evaluate water clarity, wave break patterns, tidal "
+    "mudflats, backwater palm overhangs, and mangrove ecosystems.",
+)
+INFRASTRUCTURE_TAXONOMY = (
+    "Electrical & Telecom Distribution: Differentiate pole types "
+    "(rectangular reinforced concrete posts common in South India, "
+    "cylindrical spun concrete poles, wooden cross-arm poles, steel "
+    "tubular posts, lattice transmission towers); analyze transformer "
+    "and insulator mountings (ceramic insulator shapes, transformer "
+    "bracket geometry, line count for single-phase vs. three-phase "
+    "distribution).",
+    "Roadway & Boundary Environment: Classify scene density "
+    "(High-Density Urban with multi-story commercial blocks, dense "
+    "wiring, and paved sidewalks; Peri-Urban / Suburban; Deep Rural "
+    "with narrow asphalt, unpaved red dirt shoulders, and open roadside "
+    "drainage canals); analyze road safety markers (curb painting in "
+    "yellow/black or white/black; milestone color caps with National "
+    "Highway yellow/white, State Highway green/white, District Road "
+    "black/white; metal guardrails vs. stone boundary pillars).",
+)
+ARCHITECTURAL_TAXONOMY = (
+    "Roof & Wall Material Dynamics: Classify roofs (terracotta Mangalore "
+    "clay tiles, sloped corrugated sheet metal in blue/green/red tin, "
+    "flat concrete slab roofs with drying lines, thatch, Spanish barrel "
+    "tiles); differentiate wall finishes (unplastered red laterite stone "
+    "bricks, exposed red clay bricks, whitewashed mud plaster, brightly "
+    "painted concrete in teal/pink/yellow popular in South India, exposed "
+    "cement blocks).",
+    "Domestic & Commercial Architectural Nuances: Identify structural "
+    "elements (open front verandas in Thinnai style, wooden support "
+    "carved pillars, ornamental compound gates, arched window lintels, "
+    "metal security grills); match commercial signage integration (shop "
+    "front roller shutters, sun shades/awnings, overhead water tank "
+    "brands such as Sintex, solar water heater installations) to "
+    "regional urban norms.",
+)
+ENVIRONMENTAL_INFERENCE = (
+    "Solar Geometry & Shadow Vectoring: Analyze shadow direction and sun "
+    "angle relative to structures (shadows pointing north indicate "
+    "southern hemisphere or high northern latitude depending on "
+    "time/season; perpendicular shadows help estimate latitude bands); "
+    "evaluate sky color intensity, haze, pollution/smog density, cloud "
+    "formations (cumulus vs cirrus vs coastal marine layer), and ambient "
+    "lighting temperature (warm golden hour vs cool high-altitude light).",
+    "Soil, Geological & Topographic Indexing: Differentiate pedology "
+    "(red laterite of tropical/subtropical regions like South India, "
+    "Brazil, Western Australia; black alluvial/chernozem of interior "
+    "plains and Deccan trap; sandy loess/coastal dune sand; clay; "
+    "volcanic basalt); identify geomorphology (karst limestone hills, "
+    "eroded plateau mesas, coastal cliffs, river deltas, terraced "
+    "slopes, glacial valleys).",
+    "Botanical & Agricultural Bio-Markers: Identify arboreal taxa "
+    "(coconut vs areca palms, rubber trees, acacia, eucalyptus, banyan, "
+    "pine, silver oak, mangroves); distinguish crop patterns (paddy "
+    "fields, sugarcane, tea gardens, coffee plantations, spice gardens, "
+    "wheat fields, arid scrubland).",
+)
+TRANSIT_TAXONOMY = (
+    "Electrical, Telecom & Cable Grid Mapping: Classify pole metallurgy "
+    "and form factor (square RCC concrete posts common in South India, "
+    "hollow round spun concrete, wooden cross-arm poles, steel H-beams, "
+    "tubular metal, lattice towers); inspect grid configuration "
+    "(insulator count indicating line voltage, transformer mounting "
+    "brackets, street lamp fixture types such as LED cobra-head vs "
+    "sodium vapor, fiber/cable clutter density).",
+    "Roadway Mechanics & Delineation: Infer driving orientation "
+    "(Left-Hand Drive vs Right-Hand Drive) from lane position, parked "
+    "vehicle facing directions, or road sign orientation; analyze "
+    "pavement and marking systems (lane divider colors such as solid "
+    "yellow, dashed white, double yellow; curb striping in yellow-black, "
+    "red-white, or plain concrete; asphalt quality; interlock paver "
+    "patterns; roadside drainage canal construction with open concrete "
+    "gutters vs covered culverts); inspect markers and milestones (in "
+    "India: yellow cap National Highway, green cap State Highway, "
+    "black/white cap District Road), highway shield shapes, and "
+    "reflector bollard styles.",
+)
+CULTURAL_TAXONOMY = (
+    "Vernacular Architecture & Structural Micro-Details: Classify roof "
+    "mechanics (terracotta Mangalore tiles, corrugated tin/sheet metal "
+    "color preference, slate tiles, flat concrete slab roofs with "
+    "laundry lines, thatch); analyze building accessories (rooftop "
+    "water storage tanks by brand/material such as Sintex, stainless "
+    "steel, blue plastic; solar water heater collectors; satellite dish "
+    "elevation angles and pointing direction toward equatorial "
+    "satellites; window security grill designs); differentiate boundary "
+    "walls (exposed laterite block walls, unplastered red brick, "
+    "decorative concrete piercing grills, broken-glass capped boundary "
+    "walls).",
+    "Linguistic, Script & Commercial Signals: Identify script families "
+    "(Malayalam, Tamil, Devanagari, Kannada, Telugu, Bengali, Gujarati, "
+    "Cyrillic, Arabic, Thai) and recognize bilingual/trilingual sign "
+    "hierarchies; extract commercial brands (telecom logos such as "
+    "Airtel and Jio, cement brand banners, local soda/beverage signage, "
+    "shop shutter styles).",
+    "Vehicle & Transport Cues: Identify commercial and public transit "
+    "(auto-rickshaw liveries in yellow/black, green, or state-specific "
+    "patterns; state bus colors/logos; local delivery vehicle styles); "
+    "analyze vehicle plate specs (license plate aspect ratios, "
+    "background colors with yellow commercial, white private, green EV, "
+    "red temp, and regional state registration prefixes).",
+)
 
 
 def build_spatial_prompt(
@@ -170,7 +282,12 @@ def build_spatial_prompt(
     analyze the attached raw image directly instead of halting, and a TEXT
     DECODING section directs OCR of signage, codes, and regional scripts
     with Tier-1 text anchoring. A STRUCTURAL TRIANGULATION section always
-    follows with solar, infrastructure, and biome deduction heuristics.
+    follows with solar, infrastructure, and biome deduction heuristics,
+    plus COASTAL & MARINE INDICATORS, MICRO-INFRASTRUCTURE TAXONOMY,
+    ARCHITECTURAL CLASSIFICATION, ENVIRONMENTAL & ASTRONOMICAL
+    INFERENCE, TRANSIT & GRID TAXONOMY, and CULTURAL, BUILT-ENVIRONMENT
+    & VEHICULAR CUES sections for shoreline, corridor, building,
+    environmental, transit, and cultural deduction.
     """
     if isinstance(sam_masks, dict):
         sam_masks = summarize_masks(sam_masks)
@@ -183,6 +300,12 @@ def build_spatial_prompt(
     masks_json = json.dumps(summaries, indent=2)
     breakdown = format_visual_breakdown(summaries)
     triangulation = "\n".join(f"- {item}" for item in TRIANGULATION_HEURISTICS)
+    coastal = "\n".join(f"- {item}" for item in COASTAL_INDICATORS)
+    infra = "\n".join(f"- {item}" for item in INFRASTRUCTURE_TAXONOMY)
+    arch = "\n".join(f"- {item}" for item in ARCHITECTURAL_TAXONOMY)
+    env = "\n".join(f"- {item}" for item in ENVIRONMENTAL_INFERENCE)
+    transit = "\n".join(f"- {item}" for item in TRANSIT_TAXONOMY)
+    cultural = "\n".join(f"- {item}" for item in CULTURAL_TAXONOMY)
     visual_note = ""
     ocr_section = ""
     if has_image:
@@ -206,6 +329,24 @@ VISUAL BREAKDOWN (label, category, normalized box, position):
 {visual_note}
 {ocr_section}STRUCTURAL TRIANGULATION:
 {triangulation}
+
+COASTAL & MARINE INDICATORS:
+{coastal}
+
+MICRO-INFRASTRUCTURE TAXONOMY:
+{infra}
+
+ARCHITECTURAL CLASSIFICATION:
+{arch}
+
+ENVIRONMENTAL & ASTRONOMICAL INFERENCE:
+{env}
+
+TRANSIT & GRID TAXONOMY:
+{transit}
+
+CULTURAL, BUILT-ENVIRONMENT & VEHICULAR CUES:
+{cultural}
 
 REGIONAL HINT: {hint}
 

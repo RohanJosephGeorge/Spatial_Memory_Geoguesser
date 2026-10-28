@@ -20,10 +20,16 @@ from tenacity import (
 from backend import build_frontend_result, round_wonder_coordinates
 from sam_segmentation import SamRetryableError
 from spatial_reasoning import (
+    ARCHITECTURAL_TAXONOMY,
+    COASTAL_INDICATORS,
+    CULTURAL_TAXONOMY,
+    ENVIRONMENTAL_INFERENCE,
+    INFRASTRUCTURE_TAXONOMY,
     PRECISION_LEVELS,
     REQUIRED_KEYS,
     REASONING_EFFORT,
     TEXT_ANCHOR_INSTRUCTION,
+    TRANSIT_TAXONOMY,
     TRIANGULATION_HEURISTICS,
     LocationUnknownError,
     SpatialReasoner,
@@ -615,6 +621,248 @@ class MultiHypothesisPromptTests(unittest.TestCase):
         self.assertEqual(parsed["longitude"], 76.3388)
         self.assertEqual(parsed["city"], "Alappuzha")
         self.assertEqual(len(parsed["reasoning_steps"]), 4)
+
+
+class CoastalPromptTests(unittest.TestCase):
+    def test_four_indicators_defined(self):
+        self.assertEqual(len(COASTAL_INDICATORS), 4)
+
+    def test_sand_and_soil_indicators(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "COASTAL",
+            "MARINE",
+            "white sand",
+            "golden",
+            "volcanic",
+            "Kollam",
+            "Varkala",
+            "estuarine",
+        ):
+            self.assertIn(phrase, prompt)
+
+    def test_coastal_topography_indicators(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "laterite red cliffs",
+            "tetrapods",
+            "breakwaters",
+            "spinifex",
+            "casuarina",
+        ):
+            self.assertIn(phrase, prompt)
+
+    def test_marine_craft_and_water_optics_indicators(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "catamarans",
+            "Chinese fishing nets",
+            "trawlers",
+            "painting schemes",
+            "water clarity",
+            "wave break",
+            "tidal mudflats",
+            "backwater",
+            "mangrove",
+        ):
+            self.assertIn(phrase, prompt)
+
+
+class TransitTaxonomyPromptTests(unittest.TestCase):
+    def test_two_taxonomy_entries_defined(self):
+        self.assertEqual(len(TRANSIT_TAXONOMY), 2)
+
+    def test_grid_mapping_taxonomy(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "TRANSIT",
+            "GRID",
+            "RCC",
+            "spun concrete",
+            "H-beams",
+            "tubular",
+            "lattice",
+            "insulator",
+            "cobra-head",
+            "sodium vapor",
+            "clutter",
+        ):
+            self.assertIn(phrase, prompt)
+
+    def test_roadway_delineation_taxonomy(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "Left-Hand Drive",
+            "Right-Hand Drive",
+            "parked vehicle",
+            "dashed white",
+            "double yellow",
+            "culverts",
+            "yellow cap",
+            "reflector bollard",
+        ):
+            self.assertIn(phrase, prompt)
+
+
+class CulturalPromptTests(unittest.TestCase):
+    def test_three_taxonomy_entries_defined(self):
+        self.assertEqual(len(CULTURAL_TAXONOMY), 3)
+
+    def test_vernacular_architecture_taxonomy(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "CULTURAL",
+            "Mangalore",
+            "slate tiles",
+            "laundry lines",
+            "Sintex",
+            "stainless steel",
+            "satellite dish",
+            "piercing grills",
+            "broken-glass",
+        ):
+            self.assertIn(phrase, prompt)
+
+    def test_linguistic_commercial_taxonomy(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "Devanagari",
+            "Gujarati",
+            "Thai",
+            "bilingual",
+            "Airtel",
+            "Jio",
+            "shutter styles",
+        ):
+            self.assertIn(phrase, prompt)
+
+    def test_vehicle_transport_taxonomy(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "rickshaw",
+            "liveries",
+            "aspect ratios",
+            "green EV",
+            "red temp",
+            "registration prefixes",
+        ):
+            self.assertIn(phrase, prompt)
+
+
+class EnvironmentalPromptTests(unittest.TestCase):
+    def test_three_inference_rules_defined(self):
+        self.assertEqual(len(ENVIRONMENTAL_INFERENCE), 3)
+
+    def test_solar_geometry_inference(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "ENVIRONMENTAL",
+            "ASTRONOMICAL",
+            "shadow direction",
+            "sun angle",
+            "hemisphere",
+            "latitude bands",
+            "smog",
+            "cumulus",
+            "golden hour",
+        ):
+            self.assertIn(phrase, prompt)
+
+    def test_soil_and_geology_inference(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "laterite",
+            "chernozem",
+            "Deccan",
+            "basalt",
+            "karst",
+            "mesas",
+            "deltas",
+            "terraced",
+        ):
+            self.assertIn(phrase, prompt)
+
+    def test_botanical_bio_marker_inference(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "areca",
+            "acacia",
+            "eucalyptus",
+            "silver oak",
+            "sugarcane",
+            "wheat fields",
+            "scrubland",
+        ):
+            self.assertIn(phrase, prompt)
+
+
+class ArchitecturalPromptTests(unittest.TestCase):
+    def test_two_taxonomy_entries_defined(self):
+        self.assertEqual(len(ARCHITECTURAL_TAXONOMY), 2)
+
+    def test_roof_and_wall_taxonomy(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "ARCHITECTURAL CLASSIFICATION",
+            "Mangalore",
+            "corrugated",
+            "drying lines",
+            "barrel tiles",
+            "laterite stone",
+            "whitewashed",
+            "teal",
+        ):
+            self.assertIn(phrase, prompt)
+
+    def test_domestic_and_commercial_taxonomy(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "Thinnai",
+            "carved pillars",
+            "lintels",
+            "security grills",
+            "roller shutters",
+            "awnings",
+            "Sintex",
+            "solar water heater",
+        ):
+            self.assertIn(phrase, prompt)
+
+
+class InfrastructureTaxonomyPromptTests(unittest.TestCase):
+    def test_two_taxonomy_entries_defined(self):
+        self.assertEqual(len(INFRASTRUCTURE_TAXONOMY), 2)
+
+    def test_electrical_distribution_taxonomy(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "MICRO-INFRASTRUCTURE",
+            "reinforced concrete",
+            "spun concrete",
+            "cross-arm",
+            "tubular",
+            "lattice",
+            "insulator",
+            "single-phase",
+            "three-phase",
+        ):
+            self.assertIn(phrase, prompt)
+
+    def test_roadway_boundary_taxonomy(self):
+        prompt = build_spatial_prompt([], "hint")
+        for phrase in (
+            "High-Density Urban",
+            "Peri-Urban",
+            "Deep Rural",
+            "red dirt shoulders",
+            "drainage canals",
+            "yellow/white",
+            "green/white",
+            "black/white",
+            "guardrails",
+            "boundary pillars",
+        ):
+            self.assertIn(phrase, prompt)
 
 
 class TriangulationPromptTests(unittest.TestCase):
