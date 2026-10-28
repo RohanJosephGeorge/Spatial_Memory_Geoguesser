@@ -1,6 +1,8 @@
 """Basic SpatialGeoGuesser upload app."""
 
 import asyncio
+import json
+import urllib.request
 
 import pandas as pd
 import streamlit as st
@@ -31,6 +33,41 @@ try:
     from streamlit_option_menu import option_menu
 except ImportError:  # pragma: no cover
     option_menu = None
+
+try:
+    from streamlit_lottie import st_lottie
+except ImportError:  # pragma: no cover
+    st_lottie = None
+
+LOTTIE_RADAR_URL = (
+    "https://raw.githubusercontent.com/"
+    "soheltanvir0699/radar-scan-notification-logger/main/"
+    "app/src/main/assets/lottie_radar.json"
+)
+LOTTIE_FETCH_TIMEOUT = 10.0
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_lottie_animation(url: str = LOTTIE_RADAR_URL) -> dict | None:
+    """Fetch a Lottie JSON animation; None when unavailable.
+
+    Any failure (network, timeout, invalid JSON, non-object payload)
+    returns None so callers fall back to the plain spinner.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=LOTTIE_FETCH_TIMEOUT) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def show_centered_lottie(slot, animation: dict) -> None:
+    """Render a Lottie animation centered inside a placeholder slot."""
+    with slot.container():
+        _, center, _ = st.columns([1, 2, 1])
+        with center:
+            st_lottie(animation, height=240, key="analyzing_lottie")
 
 
 def inject_heading_styles() -> None:
@@ -298,10 +335,16 @@ def render_home(developer_mode: bool = True) -> None:
             if developer_mode
             else "Analyzing memory..."
         )
+        anim_slot = st.empty()
+        if st_lottie is not None:
+            animation = load_lottie_animation()
+            if animation is not None:
+                show_centered_lottie(anim_slot, animation)
         with st.spinner(label):
             outcome = execute_analysis(
                 uploaded_file, regional_hint, developer_mode
             )
+        anim_slot.empty()
         st.session_state["analysis_outcome"] = outcome
         st.session_state["analysis_pending"] = False
         st.session_state["is_processing"] = False
