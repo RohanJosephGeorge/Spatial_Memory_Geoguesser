@@ -44,7 +44,54 @@ from PIL import Image, ImageDraw
 
 DEFAULT_BASE_URL = "https://api.meta.ai/v1"
 DEFAULT_MODEL = "sam-3.1"
-FOCUS_CONCEPTS = ("text", "architectural features", "vegetation")
+CONCEPT_CATEGORIES = {
+    "Regional Architecture & Construction": (
+        "roof materials and styles including terracotta clay tiles, "
+        "sloped tin sheet roofs, flat concrete slabs, and thatch",
+        "wall finishes including laterite stone brick, unpainted concrete, "
+        "brightly painted plaster, and mud plaster",
+        "structural features including verandas, wooden pillars, compound "
+        "walls, decorative gates, and window grills",
+    ),
+    "Flora, Agriculture & Soil": (
+        "trees including coconut palms, areca nut palms, rubber trees, "
+        "banyan and peepal trees, bamboo, pine, and banana plants",
+        "crops and ground cover including paddy fields, tea and coffee "
+        "bushes, spice foliage, and potted plants",
+        "soil and ground including red laterite soil, black alluvial soil, "
+        "sand, and clay",
+    ),
+    "Infrastructure & Utilities": (
+        "electric and utility poles including concrete rectangular posts, "
+        "wooden poles, lattice steel towers, and transformer mountings",
+        "overhead wiring configurations and cable clutter density",
+        "roads and edges including paved asphalt, red dirt tracks, "
+        "interlock paver blocks, drainage canals, and gutters",
+        "curbing and painted safety markings including yellow-black and "
+        "white-black curbs",
+    ),
+    "Local Signage, Text & Script": (
+        "shop front hoardings, banners, and store headers",
+        "regional language scripts including Malayalam, Tamil, Hindi, "
+        "Kannada, Telugu, and Bengali text",
+        "milestones, highway shields, direction boards, and house nameplates",
+    ),
+    "Local Transport & Cultural Artifacts": (
+        "auto-rickshaws, state transport buses including KSRTC, and trucks "
+        "with body art",
+        "vehicle license plates and registration color schemes including "
+        "yellow and white plates",
+    ),
+}
+FOCUS_CONCEPTS = tuple(
+    phrase for phrases in CONCEPT_CATEGORIES.values() for phrase in phrases
+)
+CONCEPT_CATEGORY = {
+    phrase: category
+    for category, phrases in CONCEPT_CATEGORIES.items()
+    for phrase in phrases
+}
+GENERAL_CATEGORY = "General"
 RETRYABLE_STATUS_CODES = frozenset({429, 503, 504})
 SAM_MAX_ATTEMPTS = 3  # Initial try plus up to 2 retries.
 SAM_RETRY_WAIT = wait_exponential(multiplier=2, max=10)  # 2s, then 4s.
@@ -151,12 +198,166 @@ def _bounds_dict(record) -> dict | None:
     }
 
 
-CONCEPT_COLORS = {
-    "text": (255, 80, 80),
-    "architectural features": (80, 160, 255),
-    "vegetation": (80, 220, 120),
+CATEGORY_COLORS = {
+    "Regional Architecture & Construction": (80, 160, 255),
+    "Flora, Agriculture & Soil": (80, 220, 120),
+    "Infrastructure & Utilities": (255, 200, 80),
+    "Local Signage, Text & Script": (255, 80, 80),
+    "Local Transport & Cultural Artifacts": (200, 120, 255),
 }
+CONCEPT_COLORS = {
+    phrase: CATEGORY_COLORS[category]
+    for category, phrases in CONCEPT_CATEGORIES.items()
+    for phrase in phrases
+}
+CONCEPT_COLORS.update(
+    {
+        "text and signage": (255, 80, 80),
+        "architectural structure and roofs": (80, 160, 255),
+        "infrastructure, utility poles, and road markings": (255, 200, 80),
+        "distinct flora and trees": (80, 220, 120),
+        "text": (255, 80, 80),
+        "architectural features": (80, 160, 255),
+        "vegetation": (80, 220, 120),
+    }
+)
 DEFAULT_BOX_COLOR = (200, 200, 200)
+
+
+def category_for_concept(concept: str | None) -> str:
+    """Return the extraction category for a concept phrase."""
+    return CONCEPT_CATEGORY.get(concept, GENERAL_CATEGORY)
+
+
+def _is_finite_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def normalize_box(
+    box: dict | None, width: int | float | None, height: int | float | None
+) -> dict | None:
+    """Normalize a pixel box to 0-1 top/left/width/height coordinates.
+
+    Returns None when the box is missing or incomplete, or when the
+    image dimensions are missing or non-positive.
+    """
+    if not isinstance(box, dict):
+        return None
+    try:
+        left, top, right, bottom = (
+            box["left"],
+            box["top"],
+            box["right"],
+            box["bottom"],
+        )
+    except KeyError:
+        return None
+    if not all(_is_finite_number(v) for v in (left, top, right, bottom)):
+        return None
+    if (
+        not _is_finite_number(width)
+        or not _is_finite_number(height)
+        or width <= 0
+        or height <= 0
+    ):
+        return None
+
+    def _clamp(value: float) -> float:
+        return round(min(1.0, max(0.0, value)), 3)
+
+    return {
+        "top": _clamp(top / height),
+        "left": _clamp(left / width),
+        "width": _clamp((right - left) / width),
+        "height": _clamp((bottom - top) / height),
+    }
+
+
+FOREGROUND_MIN_AREA = 0.20
+MIDGROUND_MIN_AREA = 0.05
+
+
+def describe_position(normalized: dict | None) -> str:
+    """Describe a normalized box as vertical, depth, and lateral zone.
+
+    Vertical and lateral split the frame into thirds; depth follows the
+    relative box area (large/close is foreground, tiny/distant is
+    background). Returns "unknown" without a usable box.
+    """
+    if not isinstance(normalized, dict):
+        return "unknown"
+    try:
+        top, left, width, height = (
+            normalized["top"],
+            normalized["left"],
+            normalized["width"],
+            normalized["height"],
+        )
+    except KeyError:
+        return "unknown"
+    if not all(_is_finite_number(v) for v in (top, left, width, height)):
+        return "unknown"
+    center_x, center_y = left + width / 2, top + height / 2
+    vertical = "upper" if center_y < 1 / 3 else "middle" if center_y < 2 / 3 else "lower"
+    lateral = "left" if center_x < 1 / 3 else "center" if center_x < 2 / 3 else "right"
+    area = width * height
+    depth = (
+        "foreground"
+        if area >= FOREGROUND_MIN_AREA
+        else "midground"
+        if area >= MIDGROUND_MIN_AREA
+        else "background"
+    )
+    return f"{vertical} {depth} {lateral}"
+
+
+def format_visual_breakdown(sam_masks) -> str:
+    """Format every mask as markdown grouped by extraction category.
+
+    Accepts summarize_masks() output or a full segment_image() result dict.
+    Each line carries the concept label, category, normalized box, and
+    spatial position; raster bytes never appear.
+    """
+    if isinstance(sam_masks, dict):
+        sam_masks = summarize_masks(sam_masks)
+    summaries = list(sam_masks or [])
+    lines = [f"## Visual breakdown ({len(summaries)} masks)"]
+    if not summaries:
+        lines.append("No segmentation masks detected.")
+        return "\n".join(lines)
+    grouped: dict[str, list[str]] = {}
+    for mask in summaries:
+        concept = mask.get("concept") or "unknown concept"
+        category = category_for_concept(mask.get("concept"))
+        normalized = normalize_box(
+            mask.get("box"), mask.get("width"), mask.get("height")
+        )
+        if normalized is None:
+            geometry = "box unknown"
+            position = "unknown"
+        else:
+            geometry = (
+                f"top={normalized['top']}, left={normalized['left']}, "
+                f"width={normalized['width']}, height={normalized['height']}"
+            )
+            position = describe_position(normalized)
+        confidence = mask.get("confidence")
+        confidence_text = (
+            f"{confidence:.2f}"
+            if _is_finite_number(confidence)
+            else "n/a"
+        )
+        grouped.setdefault(category, []).append(
+            f"- {concept} #{mask.get('object_id', '?')} "
+            f"(conf {confidence_text}) @ {geometry} \u2014 {position}"
+        )
+    ordered = [c for c in CONCEPT_CATEGORIES if c in grouped]
+    ordered.extend(c for c in grouped if c not in ordered)
+    for category in ordered:
+        entries = grouped[category]
+        lines.append(f"### {category} ({len(entries)})")
+        lines.extend(entries)
+    return "\n".join(lines)
 
 
 def summarize_masks(result: dict | None) -> list[dict]:

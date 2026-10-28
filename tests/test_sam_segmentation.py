@@ -142,7 +142,7 @@ class FanOutTests(unittest.IsolatedAsyncioTestCase):
         session = FakeSession(FakeResponse(events=success_events()))
         seg = SamSegmenter(api_key="test-key", session=session)
         result = await seg.segment_image(gradient_png())
-        self.assertEqual(len(session.calls), 3)
+        self.assertEqual(len(session.calls), len(FOCUS_CONCEPTS))
         self.assertEqual(result["concepts"], list(FOCUS_CONCEPTS))
         self.assertEqual(result["model"], "sam-3.1")
         seen = set()

@@ -25,6 +25,7 @@ from sam_segmentation import (
     SamApiError,
     SamRetryableError,
     default_sam_retrying,
+    format_visual_breakdown,
     get_meta_api_key,
     summarize_masks,
 )
@@ -109,7 +110,8 @@ def build_spatial_prompt(
 
     sam_masks accepts summarize_masks() output or a full segment_image()
     result dict (summarized automatically; raster bytes never enter the
-    prompt).
+    prompt). Every mask also appears in a VISUAL BREAKDOWN section with
+    its category, normalized box, and spatial position.
     """
     if isinstance(sam_masks, dict):
         sam_masks = summarize_masks(sam_masks)
@@ -118,13 +120,18 @@ def build_spatial_prompt(
     )
     hint = (regional_hint or "").strip() or "(no hint provided)"
     rules_text = "\n".join(f"{index}. {rule}" for index, rule in enumerate(rules, 1))
-    masks_json = json.dumps(list(sam_masks), indent=2)
+    summaries = list(sam_masks)
+    masks_json = json.dumps(summaries, indent=2)
+    breakdown = format_visual_breakdown(summaries)
     return f"""You are a geospatial reasoning engine. Geolocate the photo from its SAM 3.1 segmentation masks and a regional hint.
 
 Reason in multiple steps: (1) inventory the visible evidence per concept; (2) combine independent clues into candidate regions; (3) eliminate candidates inconsistent with any clue; (4) commit to one fix with a calibrated confidence score.
 
 SEGMENTATION MASKS (concept, object id, box, size, confidence):
 {masks_json}
+
+VISUAL BREAKDOWN (label, category, normalized box, position):
+{breakdown}
 
 REGIONAL HINT: {hint}
 
