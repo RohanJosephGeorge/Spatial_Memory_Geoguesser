@@ -1,17 +1,17 @@
 """Face screening for uploads.
 
-Uses the open-weights YuNet face-detection DNN (OpenCV zoo weights,
-fetched once to a local cache). Any single face covering more than 5% of
-the image area rejects the image; smaller detected faces are heavily
-blurred with Pillow before the image is passed on. Only clean or
-successfully blurred images move forward.
+Uses OpenCV's bundled Haar cascade (frontal-face weights ship with
+opencv-python, so detection is fully offline with no downloads).
+Strict cascade parameters suppress background noise, and boxes under
+MIN_FACE_PIXELS are dropped as pixel artifacts. Any single remaining
+face covering more than 5% of the image area rejects the image;
+smaller detected faces are heavily blurred with Pillow before the
+image is passed on. Only clean or successfully blurred images move
+forward.
 """
 
 from __future__ import annotations
 
-import os
-import urllib.request
-from pathlib import Path
 from typing import BinaryIO, Callable
 
 import numpy as np
@@ -23,12 +23,10 @@ except ImportError:  # pragma: no cover
     cv2 = None
 
 FACE_AREA_THRESHOLD = 0.05
-YUNET_MODEL_URL = (
-    "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/"
-    "models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
-)
-YUNET_MODEL_NAME = "face_detection_yunet_2023mar.onnx"
-YUNET_SCORE_THRESHOLD = 0.6
+CASCADE_SCALE_FACTOR = 1.1
+CASCADE_MIN_NEIGHBORS = 10
+CASCADE_MIN_SIZE = (50, 50)
+MIN_FACE_PIXELS = 50
 BLUR_PADDING_RATIO = 0.15
 
 Box = tuple[int, int, int, int]
@@ -51,38 +49,38 @@ def find_oversized_face(
     return None
 
 
-def yunet_model_path() -> Path:
-    """Local YuNet weights path (override with YUNET_MODEL_PATH)."""
-    override = os.environ.get("YUNET_MODEL_PATH")
-    if override:
-        return Path(override)
-    return Path.home() / ".cache" / "spatialgeoguesser" / YUNET_MODEL_NAME
-
-
-def ensure_yunet_weights() -> Path:
-    """Fetch the open YuNet weights once; return the local path."""
-    path = yunet_model_path()
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        urllib.request.urlretrieve(YUNET_MODEL_URL, path)
-    return path
-
-
 def detect_face_boxes(bgr: np.ndarray) -> list[Box]:
-    """Detect faces with the open-weights YuNet DNN (BGR input)."""
+    """Detect faces with the offline Haar cascade (grayscale input).
+
+    Fully local: the cascade XML ships with OpenCV, so no weights are
+    ever downloaded. Boxes under MIN_FACE_PIXELS are dropped as
+    pixel artifacts.
+    """
     if cv2 is None:
         raise RuntimeError("OpenCV is not installed; face detection unavailable.")
-    if not hasattr(cv2, "FaceDetectorYN_create"):
-        raise RuntimeError("This OpenCV build lacks the YuNet face detector.")
-    model = str(ensure_yunet_weights())
-    height, width = bgr.shape[:2]
-    detector = cv2.FaceDetectorYN_create(
-        model, "", (width, height), YUNET_SCORE_THRESHOLD, 0.3, 5000
+    cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
     )
-    _, faces = detector.detect(bgr)
-    if faces is None:
+    if cascade.empty():
+        raise RuntimeError(
+            "Haar cascade weights missing from this OpenCV install; "
+            "face detection unavailable."
+        )
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    faces = cascade.detectMultiScale(
+        gray,
+        scaleFactor=CASCADE_SCALE_FACTOR,
+        minNeighbors=CASCADE_MIN_NEIGHBORS,
+        minSize=CASCADE_MIN_SIZE,
+    )
+    if len(faces) == 0:
         return []
-    return [(int(x), int(y), int(w), int(h)) for x, y, w, h, *_ in faces]
+    boxes = [(int(x), int(y), int(w), int(h)) for x, y, w, h in faces]
+    return [
+        box
+        for box in boxes
+        if box[2] >= MIN_FACE_PIXELS and box[3] >= MIN_FACE_PIXELS
+    ]
 
 
 def to_bgr(image: Image.Image) -> np.ndarray:

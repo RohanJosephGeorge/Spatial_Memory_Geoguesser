@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from analysis import execute_analysis
+from backend import build_frontend_result, round_wonder_coordinates
 from face_screening import screen_image_faces
 from file_sanitizer import is_valid_image, sanitize_uploaded_image
 from image_quality import has_sufficient_visual_data
@@ -41,7 +42,7 @@ except ImportError:  # pragma: no cover
 
 try:
     import streamlit_antd_components as sac
-except ImportError:  # pragma: no cover
+except Exception:  # pragma: no cover - missing OR broken install degrades
     sac = None
 
 try:
@@ -67,6 +68,10 @@ LOTTIE_RADAR_URL = (
     "soheltanvir0699/radar-scan-notification-logger/main/"
     "app/src/main/assets/lottie_radar.json"
 )
+LOTTIE_SEARCH_EMPTY_URL = (
+    "https://raw.githubusercontent.com/ramani888/biblestudy/master/"
+    "frontend/src/assets/animations/empty.json"
+)
 LOTTIE_FETCH_TIMEOUT = 10.0
 
 
@@ -85,12 +90,14 @@ def load_lottie_animation(url: str = LOTTIE_RADAR_URL) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def show_centered_lottie(slot, animation: dict) -> None:
+def show_centered_lottie(
+    slot, animation: dict, key: str = "analyzing_lottie"
+) -> None:
     """Render a Lottie animation centered inside a placeholder slot."""
     with slot.container():
         _, center, _ = st.columns([1, 2, 1])
         with center:
-            st_lottie(animation, height=240, key="analyzing_lottie")
+            st_lottie(animation, height=240, key=key)
 
 
 def inject_heading_styles() -> None:
@@ -201,67 +208,87 @@ def render_analysis_outcome(outcome: dict | None) -> None:
         st.error(outcome.get("message", "Analysis failed."))
 
 
-async def _run_sam_segmentation(screened_image, on_retry):
-    async with SamSegmenter(on_retry=on_retry) as segmenter:
-        return await segmenter.segment_image(screened_image)
-
-
-def render_sam_section(screened_image, is_processing: bool = False) -> None:
-    """Live SAM 3.1 concept segmentation for the screened upload."""
-    if screened_image is None:
-        return
-    st.space("small")
-    st.subheader("SAM 3.1 live segmentation")
-    st.caption(
-        "Concept masks for text, architectural features, and vegetation "
-        "via Meta Model API (requires META_API_KEY in secrets)."
-    )
-    if st.button(
-        "Segment with SAM 3.1",
-        key="sam_btn",
-        disabled=is_processing,
-        help="Sends the full-resolution screened image to SAM 3.1.",
-    ):
-        retry_status = st.empty()
-
-        def _show_retry(attempt: int, wait_seconds: float) -> None:
-            retry_status.info(RETRY_STATUS_TEXT)
-
-        try:
-            with st.spinner("Segmenting with SAM 3.1..."):
-                sam_result = asyncio.run(
-                    _run_sam_segmentation(screened_image, _show_retry)
-                )
-        except SamApiError as exc:
-            retry_status.empty()
-            st.session_state["sam_result"] = {"error": str(exc)}
-        else:
-            retry_status.empty()
-            st.session_state["sam_result"] = {
-                "summary": summarize_masks(sam_result),
-                "annotated": draw_mask_boxes(
-                    screened_image, sam_result.get("masks", [])
-                ),
-                "mask_count": sam_result.get("mask_count", 0),
-            }
-    stored = st.session_state.get("sam_result")
-    if not stored:
-        return
-    if "error" in stored:
-        st.error(stored["error"])
-    else:
-        st.success(f"SAM 3.1 found {stored['mask_count']} mask(s).")
-        st.image(
-            stored["annotated"],
-            caption="SAM 3.1 concept boxes",
-            use_container_width=True,
-        )
-        st.json(stored["summary"])
-
-
 async def _run_wonder_reasoning(sam_summary, regional_hint, on_retry):
     async with SpatialReasoner(on_retry=on_retry) as reasoner:
         return await reasoner.reason(sam_summary, regional_hint)
+
+
+async def _run_live_pipeline(safe_image, regional_hint, on_retry=None):
+    """Run SAM 3.1 segmentation then Muse Wonder reasoning directly."""
+    async with SamSegmenter(on_retry=on_retry) as segmenter:
+        sam_result = await segmenter.segment_image(safe_image)
+    async with SpatialReasoner(on_retry=on_retry) as reasoner:
+        return await reasoner.reason(
+            summarize_masks(sam_result), regional_hint
+        )
+
+
+def _run_live_pipeline_sync(safe_image, regional_hint, on_retry=None):
+    """Sync wrapper for the direct SAM+Wonder pipeline (test seam)."""
+    return asyncio.run(_run_live_pipeline(safe_image, regional_hint, on_retry))
+
+
+def execute_live_analysis_direct(
+    uploaded_file, regional_hint: str, screener=screen_image_faces
+) -> dict:
+    """Validate gates then run SAM+Wonder directly (no localhost backend).
+
+    Returns the same outcome shape as analysis.execute_analysis:
+    {"kind": "ok", "mock": False, "result": dict} on success, or
+    {"kind": "halt"|"error", "message": str}.
+    """
+    valid, message = is_valid_image(uploaded_file)
+    if not valid:
+        return {"kind": "halt", "message": f"Cannot analyze yet: {message}"}
+    clean_ok, clean_message, rgb_image = sanitize_uploaded_image(uploaded_file)
+    if not clean_ok:
+        return {"kind": "halt", "message": f"Cannot analyze yet: {clean_message}"}
+    data_ok, data_message, _ = has_sufficient_visual_data(rgb_image)
+    if not data_ok:
+        return {"kind": "halt", "message": data_message}
+    status, face_message, safe_image = screener(rgb_image)
+    if status in ("rejected", "error"):
+        return {"kind": "halt", "message": f"Cannot analyze: {face_message}"}
+    try:
+        wonder_result = _run_live_pipeline_sync(safe_image, regional_hint)
+    except (SamApiError, SpatialReasoningError) as exc:
+        return {"kind": "error", "message": str(exc)}
+    try:
+        rounded = round_wonder_coordinates(wonder_result)
+    except ValueError as exc:
+        return {"kind": "error", "message": f"Invalid location result: {exc}"}
+    result = build_frontend_result(rounded, uploaded_file.name, regional_hint)
+    result["mode"] = "live"
+    return {"kind": "ok", "mock": False, "result": result}
+
+
+LOW_CONFIDENCE_THRESHOLD = 0.2
+
+
+def is_uncertain_result(result: dict) -> bool:
+    """Null coordinates or confidence below 20%: location not determined."""
+    result = result or {}
+    if result.get("latitude") is None or result.get("longitude") is None:
+        return True
+    confidence = result.get("confidence_score", 0)
+    if isinstance(confidence, bool) or not isinstance(
+        confidence, (int, float)
+    ):
+        return True
+    return confidence < LOW_CONFIDENCE_THRESHOLD
+
+
+def render_uncertain_result(result: dict) -> None:
+    """Empty-search animation plus the AI's reasoning for the failure."""
+    steps = list((result or {}).get("reasoning_steps") or ["Analysis halted."])
+    if st_lottie is not None:
+        animation = load_lottie_animation(LOTTIE_SEARCH_EMPTY_URL)
+        if animation is not None:
+            show_centered_lottie(st.empty(), animation, key="uncertain_lottie")
+    st.info(
+        "**Why the location couldn't be determined:**\n"
+        + "\n".join(f"- {step}" for step in steps)
+    )
 
 
 def render_wonder_result(result: dict) -> None:
@@ -347,10 +374,11 @@ def render_wonder_section(
         st.error(stored["error"])
     else:
         result = stored["result"]
-        if result.get("latitude") is None:
-            steps = result.get("reasoning_steps") or ["Analysis halted."]
-            st.warning(f"Analysis halted: {steps[0]}")
-            render_wonder_result(result)
+        if is_uncertain_result(result):
+            if result.get("latitude") is None:
+                steps = result.get("reasoning_steps") or ["Analysis halted."]
+                st.warning(f"Analysis halted: {steps[0]}")
+            render_uncertain_result(result)
         else:
             st.success(
                 f"Located: {result['city']}, {result['country']} "
@@ -363,7 +391,7 @@ def render_wonder_section(
                 render_wonder_folium_map(result)
 
 
-def render_home(developer_mode: bool = True) -> None:
+def render_home(developer_mode: bool = False) -> None:
     st.session_state.setdefault("is_processing", False)
     st.session_state.setdefault("analysis_pending", False)
     st.session_state.setdefault("analysis_outcome", None)
@@ -371,6 +399,11 @@ def render_home(developer_mode: bool = True) -> None:
     st.session_state.setdefault("screened_image", None)
     st.session_state.setdefault("sam_result", None)
     st.session_state.setdefault("wonder_result", None)
+    st.session_state.setdefault("developer_mode", developer_mode)
+    if st.session_state.developer_mode:
+        developer_mode = True
+    else:
+        developer_mode = False
     is_processing = st.session_state["is_processing"]
 
     st.title("SpatialGeoGuesser")
@@ -456,19 +489,33 @@ def render_home(developer_mode: bool = True) -> None:
             if developer_mode
             else "Analyzing memory..."
         )
-        anim_slot = st.empty()
-        if st_lottie is not None:
-            animation = load_lottie_animation()
-            if animation is not None:
-                show_centered_lottie(anim_slot, animation)
-        with st.spinner(label):
-            outcome = execute_analysis(
-                uploaded_file, regional_hint, developer_mode
-            )
-        anim_slot.empty()
-        st.session_state["analysis_outcome"] = outcome
-        st.session_state["analysis_pending"] = False
-        st.session_state["is_processing"] = False
+        anim_slot = None
+        try:
+            anim_slot = st.empty()
+            if st_lottie is not None:
+                animation = load_lottie_animation()
+                if animation is not None:
+                    show_centered_lottie(anim_slot, animation)
+            with st.spinner(label):
+                if st.session_state.developer_mode:
+                    outcome = execute_analysis(
+                        uploaded_file, regional_hint, True
+                    )
+                else:
+                    outcome = execute_live_analysis_direct(
+                        uploaded_file, regional_hint
+                    )
+            st.session_state["analysis_outcome"] = outcome
+        except Exception as exc:
+            st.session_state["analysis_outcome"] = {
+                "kind": "error",
+                "message": f"Analysis failed unexpectedly: {exc}",
+            }
+        finally:
+            if anim_slot is not None:
+                anim_slot.empty()
+            st.session_state["analysis_pending"] = False
+            st.session_state["is_processing"] = False
         st.rerun()
 
     upload_key = (
@@ -484,15 +531,6 @@ def render_home(developer_mode: bool = True) -> None:
         st.session_state["wonder_result"] = None
 
     render_analysis_outcome(st.session_state["analysis_outcome"])
-    render_sam_section(
-        st.session_state["screened_image"], is_processing=is_processing
-    )
-    sam_stored = st.session_state.get("sam_result") or {}
-    render_wonder_section(
-        sam_stored.get("summary"),
-        regional_hint,
-        is_processing=is_processing,
-    )
 
 
 def render_how_it_works() -> None:
@@ -506,8 +544,9 @@ def render_how_it_works() -> None:
         "rejected, smaller faces are blurred.\n"
         "3. **Add a regional hint** such as nearby landmarks or architecture.\n"
         "4. **Analyze** to get location hypotheses based on visual clues.\n"
-        "5. **Go live** (optional): segment with SAM 3.1, then geolocate "
-        "with Muse Wonder using your Meta API key."
+        "5. **Live mode**: with Developer Mode off, Analyze runs SAM 3.1 "
+        "segmentation and Muse Wonder geolocation directly via the Meta "
+        "Model API."
     )
 
 
@@ -529,10 +568,10 @@ def main() -> None:
 
     developer_mode = st.sidebar.toggle(
         "Developer Mode (Use Mock Data)",
-        value=True,
+        value=False,
         key="developer_mode",
         help="When on, Analyze Memory returns instant mock data instead of "
-        "calling the FastAPI backend.",
+        "calling the Meta Model API directly.",
     )
 
     if option_menu is None:

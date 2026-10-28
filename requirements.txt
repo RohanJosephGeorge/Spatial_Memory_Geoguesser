@@ -1,13 +1,14 @@
 streamlit>=1.45.0
 streamlit-option-menu>=0.4.0
 streamlit-extras>=0.7.0
-opencv-python-headless>=4.8.0
+# Haar CascadeClassifier API was removed in OpenCV 5; face detection needs 4.x.
+opencv-python-headless>=4.8,<5
 pillow>=10.0.0
 aiohttp>=3.9
 meta-sam-parser>=0.0.5
 tenacity>=9.0
 streamlit-shadcn-ui @ git+https://github.com/ObservedObserver/streamlit-shadcn-ui.git
-streamlit-antd-components @ git+https://github.com/nicedouble/StreamlitAntdComponents.git
+streamlit-antd-components>=0.3.2
 fastapi>=0.110.0
 uvicorn>=0.29.0
 streamlit-lottie>=0.0.5

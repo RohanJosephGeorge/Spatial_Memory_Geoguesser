@@ -111,6 +111,19 @@ class RenderWonderFoliumMapTests(unittest.TestCase):
             app.render_wonder_folium_map(good_result())
         mock_st.map.assert_called_once()
 
+    def test_location_unknown_renders_error_state(self):
+        mock_st = MagicMock()
+        mock_st.session_state.get.return_value = {
+            "location_unknown": "the model returned coordinates 0.0, 0.0."
+        }
+        mock_st.button.return_value = False
+        with patch.object(app, "st", mock_st):
+            app.render_wonder_section([{"concept": "text"}], "", False)
+        mock_st.error.assert_called_once_with(
+            "Location Unknown: the model returned coordinates 0.0, 0.0."
+        )
+        mock_st.map.assert_not_called()
+
     def test_success_branch_lays_out_result_left_map_right(self):
         mock_st = MagicMock()
         left, right = MagicMock(), MagicMock()

@@ -6,12 +6,16 @@ Requires only numpy and Pillow (no OpenCV, no Streamlit).
 
 import io
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
 
+import face_screening
 from face_screening import (
     blur_face_regions,
+    detect_face_boxes,
     face_area_ratio,
     find_oversized_face,
     preprocess_uploaded_image,
@@ -101,6 +105,109 @@ class BlurLocalityTests(unittest.TestCase):
 class PreprocessUploadTests(unittest.TestCase):
     def test_garbage_bytes_fail_closed(self):
         status, _, out = preprocess_uploaded_image(io.BytesIO(b"not an image"))
+        self.assertEqual(status, "error")
+        self.assertIsNone(out)
+
+
+class FakeCascade:
+    def __init__(self, faces, detections, empty=False):
+        self._faces = faces
+        self._detections = detections
+        self._empty = empty
+
+    def empty(self):
+        return self._empty
+
+    def detectMultiScale(
+        self, gray, scaleFactor=None, minNeighbors=None, minSize=None
+    ):
+        self._detections.append(
+            {
+                "gray": gray,
+                "scaleFactor": scaleFactor,
+                "minNeighbors": minNeighbors,
+                "minSize": minSize,
+            }
+        )
+        return self._faces
+
+
+class FakeCv2Haar:
+    """Minimal cv2 stub exposing only the Haar cascade entry points."""
+
+    COLOR_BGR2GRAY = 6
+
+    def __init__(self, faces, constructed, detections, empty=False):
+        self._faces = faces
+        self.constructed = constructed
+        self.detections = detections
+        self._empty = empty
+        self.data = SimpleNamespace(haarcascades="/fake/haarcascades/")
+        self.cvt_calls = []
+
+    def CascadeClassifier(self, path):
+        self.constructed.append(path)
+        return FakeCascade(self._faces, self.detections, self._empty)
+
+    def cvtColor(self, image, code):
+        out = image[:, :, 0]
+        self.cvt_calls.append({"code": code, "out": out})
+        return out
+
+
+class HaarCascadeTests(unittest.TestCase):
+    def detect_with(self, faces, empty=False):
+        fake = FakeCv2Haar(faces, [], [], empty)
+        bgr = np.zeros((480, 640, 3), dtype=np.uint8)
+        with patch.object(face_screening, "cv2", fake):
+            return detect_face_boxes(bgr), fake
+
+    def test_uses_bundled_offline_cascade(self):
+        _, fake = self.detect_with(())
+        self.assertEqual(
+            fake.constructed,
+            ["/fake/haarcascades/" + "haarcascade_frontalface_default.xml"],
+        )
+        self.assertFalse(hasattr(face_screening, "urllib"))
+        self.assertFalse(hasattr(face_screening, "ensure_yunet_weights"))
+
+    def test_strict_cascade_parameters(self):
+        self.assertEqual(face_screening.CASCADE_SCALE_FACTOR, 1.1)
+        self.assertEqual(face_screening.CASCADE_MIN_NEIGHBORS, 10)
+        self.assertEqual(face_screening.CASCADE_MIN_SIZE, (50, 50))
+        _, fake = self.detect_with(())
+        self.assertEqual(len(fake.detections), 1)
+        params = fake.detections[0]
+        self.assertEqual(params["scaleFactor"], 1.1)
+        self.assertEqual(params["minNeighbors"], 10)
+        self.assertEqual(params["minSize"], (50, 50))
+
+    def test_grayscale_before_detect(self):
+        _, fake = self.detect_with(())
+        self.assertEqual(len(fake.cvt_calls), 1)
+        self.assertEqual(
+            fake.cvt_calls[0]["code"], FakeCv2Haar.COLOR_BGR2GRAY
+        )
+        self.assertIs(
+            fake.detections[0]["gray"], fake.cvt_calls[0]["out"]
+        )
+
+    def test_boxes_normalized_and_tiny_dropped(self):
+        boxes, _ = self.detect_with(
+            np.array([[10, 10, 100, 80], [5, 5, 20, 20]], dtype=np.int32)
+        )
+        self.assertEqual(boxes, [(10, 10, 100, 80)])
+
+    def test_no_faces_returns_empty(self):
+        boxes, _ = self.detect_with(())
+        self.assertEqual(boxes, [])
+
+    def test_missing_cascade_fails_closed(self):
+        with self.assertRaises(RuntimeError):
+            self.detect_with((), empty=True)
+        fake = FakeCv2Haar((), [], [], empty=True)
+        with patch.object(face_screening, "cv2", fake):
+            status, _, out = screen_image_faces(gradient_image())
         self.assertEqual(status, "error")
         self.assertIsNone(out)
 
