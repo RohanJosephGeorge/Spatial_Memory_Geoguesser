@@ -49,6 +49,16 @@ try:
 except ImportError:  # pragma: no cover
     style_metric_cards = None
 
+try:
+    import folium
+except ImportError:  # pragma: no cover
+    folium = None
+
+try:
+    from streamlit_folium import st_folium
+except ImportError:  # pragma: no cover
+    st_folium = None
+
 NEON_ACCENT = "#00FFAA"
 METRIC_CARD_BACKGROUND = "#1E1E1E"
 
@@ -104,6 +114,73 @@ def render_result_map(result: dict) -> None:
     lat, lon = coords.get("latitude"), coords.get("longitude")
     if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
         st.map(pd.DataFrame([{"lat": lat, "lon": lon}]), zoom=13)
+
+
+PRECISION_RADII_METERS = {
+    "Public Landmark": 50,
+    "Street Level": 100,
+    "Neighborhood Radius": 500,
+}
+DEFAULT_RADIUS_METERS = 500
+FOLIUM_DARK_TILES = "CartoDB dark_matter"
+CIRCLE_FILL_OPACITY = 0.3
+WONDER_MAP_HEIGHT = 400
+
+
+def precision_to_radius(precision_level: str) -> int:
+    """Map a Wonder precision_level to a map circle radius in meters.
+
+    Unknown levels fail toward the widest, most private radius.
+    """
+    return PRECISION_RADII_METERS.get(precision_level, DEFAULT_RADIUS_METERS)
+
+
+def build_wonder_folium_map(result: dict):
+    """Build a dark-theme folium map with a precision circle.
+
+    Returns None when folium is unavailable or coordinates are missing.
+    """
+    if folium is None:
+        return None
+    result = result or {}
+    lat, lon = result.get("latitude"), result.get("longitude")
+    if not (
+        isinstance(lat, (int, float)) and isinstance(lon, (int, float))
+    ):
+        return None
+    radius = precision_to_radius(result.get("precision_level"))
+    fmap = folium.Map(
+        location=[lat, lon],
+        zoom_start=14 if radius >= 500 else 15,
+        tiles=FOLIUM_DARK_TILES,
+    )
+    folium.Circle(
+        location=[lat, lon],
+        radius=radius,
+        color=NEON_ACCENT,
+        weight=3,
+        opacity=1.0,
+        fill=True,
+        fill_color=NEON_ACCENT,
+        fill_opacity=CIRCLE_FILL_OPACITY,
+    ).add_to(fmap)
+    return fmap
+
+
+def render_wonder_folium_map(result: dict) -> None:
+    """Render the Wonder precision map, falling back to st.map if needed."""
+    fmap = build_wonder_folium_map(result)
+    if fmap is None or st_folium is None:
+        render_result_map(
+            {
+                "coordinates": {
+                    "latitude": (result or {}).get("latitude"),
+                    "longitude": (result or {}).get("longitude"),
+                }
+            }
+        )
+        return
+    st_folium(fmap, height=WONDER_MAP_HEIGHT, use_container_width=True)
 
 
 def render_analysis_outcome(outcome: dict | None) -> None:
@@ -279,15 +356,11 @@ def render_wonder_section(
                 f"Located: {result['city']}, {result['country']} "
                 f"({result['confidence_score']:.0%} confidence)."
             )
-            render_wonder_result(result)
-            render_result_map(
-                {
-                    "coordinates": {
-                        "latitude": result["latitude"],
-                        "longitude": result["longitude"],
-                    }
-                }
-            )
+            result_col, map_col = st.columns([3, 2])
+            with result_col:
+                render_wonder_result(result)
+            with map_col:
+                render_wonder_folium_map(result)
 
 
 def render_home(developer_mode: bool = True) -> None:

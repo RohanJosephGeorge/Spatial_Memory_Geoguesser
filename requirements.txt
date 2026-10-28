@@ -11,3 +11,4 @@ streamlit-antd-components @ git+https://github.com/nicedouble/StreamlitAntdCompo
 fastapi>=0.110.0
 uvicorn>=0.29.0
 streamlit-lottie>=0.0.5
+streamlit-folium>=0.15.0
