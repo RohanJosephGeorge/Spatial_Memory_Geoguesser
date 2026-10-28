@@ -39,6 +39,19 @@ try:
 except ImportError:  # pragma: no cover
     st_lottie = None
 
+try:
+    import streamlit_antd_components as sac
+except ImportError:  # pragma: no cover
+    sac = None
+
+try:
+    from streamlit_extras.metric_cards import style_metric_cards
+except ImportError:  # pragma: no cover
+    style_metric_cards = None
+
+NEON_ACCENT = "#00FFAA"
+METRIC_CARD_BACKGROUND = "#1E1E1E"
+
 LOTTIE_RADAR_URL = (
     "https://raw.githubusercontent.com/"
     "soheltanvir0699/radar-scan-notification-logger/main/"
@@ -174,6 +187,41 @@ async def _run_wonder_reasoning(sam_summary, regional_hint, on_retry):
         return await reasoner.reason(sam_summary, regional_hint)
 
 
+def render_wonder_result(result: dict) -> None:
+    """Render a Wonder result: reasoning as nodes, scores as metric cards."""
+    steps_list = list(result.get("reasoning_steps") or [])
+    if sac is not None and steps_list:
+        sac.steps(
+            items=steps_list,
+            index=len(steps_list) - 1,
+            direction="vertical",
+            dot=True,
+            color=NEON_ACCENT,
+        )
+    else:
+        for step in steps_list:
+            st.markdown(f"- {step}")
+    confidence_col, precision_col = st.columns(2)
+    with confidence_col:
+        st.metric(
+            "Confidence Score",
+            f"{result.get('confidence_score', 0):.0%}",
+        )
+    with precision_col:
+        st.metric(
+            "Precision Level",
+            result.get("precision_level", "Unknown"),
+        )
+    if style_metric_cards is not None:
+        style_metric_cards(
+            background_color=METRIC_CARD_BACKGROUND,
+            border_color=NEON_ACCENT,
+            border_left_color=NEON_ACCENT,
+            border_size_px=1,
+            border_radius_px=8,
+        )
+
+
 def render_wonder_section(
     sam_summary, regional_hint: str, is_processing: bool = False
 ) -> None:
@@ -225,13 +273,13 @@ def render_wonder_section(
         if result.get("latitude") is None:
             steps = result.get("reasoning_steps") or ["Analysis halted."]
             st.warning(f"Analysis halted: {steps[0]}")
-            st.json(result)
+            render_wonder_result(result)
         else:
             st.success(
                 f"Located: {result['city']}, {result['country']} "
                 f"({result['confidence_score']:.0%} confidence)."
             )
-            st.json(result)
+            render_wonder_result(result)
             render_result_map(
                 {
                     "coordinates": {
